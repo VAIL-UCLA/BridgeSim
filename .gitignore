@@ -1,0 +1,109 @@
+# Ignore sensor images directory
+sensor_images/
+bev_visualizations/
+*/offline_outputs*
+
+# Symlinks
+metadrive_evaluation/data
+
+# Bench2Drive datasets
+**/Bench2Drive-mini/
+**/Bench2Drive-Map/
+**/converted_scenarios/
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Videos
+*.mp4
+*.avi
+*.mov
+
+# JSON
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+.venv/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude
+.DS_Store
+
+# System files
+Thumbs.db
+*.log
+*.tmp
+
+# Documentation builds
+docs/_build/
+.tox/
+.coverage
+htmlcov/
+
+# Machine Learning and Data
+*.model
+*.pkl.txt
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.log
+wandb/
+mlruns/
+checkpoints/
+checkpoint/
+ckpt/
+ckpts/
+nuscenes/
+waymo_test_data/
+tensorboard_logs/
+.neptune/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.cache
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

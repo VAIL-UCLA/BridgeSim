@@ -1,0 +1,160 @@
+# Use the correct NVIDIA CUDA base image to match the project's requirements
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+
+# Set environment variables to prevent interactive prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+# Switch to root user for installations
+USER root
+
+# Proxy settings, only necessary if behind a corporate proxy
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+EXPOSE 5901
+
+# Install essential system dependencies, including GCC-9 for compatibility
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    apt-utils \
+    cmake \
+    git \
+    git-lfs \
+    curl \
+    wget \
+    rsync \
+    vim \
+    unzip \
+    htop \
+    tmux \
+    tar \
+    ca-certificates \
+    menu \
+    mlocate \
+    net-tools \
+    xauth \
+    xorg \
+    x11-xserver-utils \
+    x11vnc \
+    xinit \
+    websockify \
+    openbox \
+    libegl1-mesa \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libglvnd-dev \
+    libice6 \
+    libjpeg-dev \
+    libjpeg-turbo8 \
+    libomp5 \
+    libpng-dev \
+    libpng16-16 \
+    libtiff5 \
+    libomp5 \
+    libsdl2-2.0 \
+    libsm6 \
+    libx11-dev \
+    libxaw7 \
+    libxext-dev \
+    libxkbfile1 \
+    libxmu6 \
+    libxpm4 \
+    libxt6 \
+    libvulkan1 \
+    x11-apps \
+    x11-common \
+    x11-xkb-utils \
+    xkb-data \
+    xserver-xorg \
+    vulkan-tools \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    software-properties-common \
+    gcc-9 \
+    g++-9 && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    python3 -m pip install --upgrade pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# VNC and VirtualGL installation
+RUN wget https://sourceforge.net/projects/virtualgl/files/3.1/virtualgl_3.1_amd64.deb \
+    && dpkg -i virtualgl_3.1_amd64.deb
+
+
+RUN wget https://phoenixnap.dl.sourceforge.net/project/turbovnc/3.0.3/turbovnc_3.0.3_amd64.deb \
+    && dpkg -i turbovnc*.deb \
+    && rm -f turbovnc*.deb
+
+ENV PATH="/opt/TurboVNC/bin:$PATH"
+
+# Install Miniconda
+ENV CONDA_ALWAYS_YES=true
+
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py38_23.1.0-1-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    /bin/bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh && \
+    /opt/conda/bin/conda clean -ya
+
+ENV PATH="/opt/conda/bin:$PATH"
+
+COPY nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
+COPY nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
+
+# Create a non-root user and the work directory
+RUN useradd -ms /bin/bash abhijit && \
+    mkdir -p /home/abhijit/Work && \
+    chown -R abhijit:abhijit /home/abhijit
+
+RUN apt-get update && \
+    apt-get install -y sudo && \
+    adduser abhijit sudo && \
+    echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    rm -rf /var/lib/apt/lists/*
+
+# Switch to the new non-root user for the rest of the build
+USER abhijit
+WORKDIR /home/abhijit/Work
+
+# --- Project Specific Setup ---
+
+# Set up build argument for the GitHub token
+ARG GITHUB_TOKEN
+
+# Clone the private repository
+RUN if [ -z "$GITHUB_TOKEN" ]; then echo "Error: GITHUB_TOKEN is not set." && exit 1; fi && \
+    git clone https://oauth2:${GITHUB_TOKEN}@github.com/sethzhao506/BridgeSim.git
+
+ARG HUGGINGFACE_TOKEN
+
+RUN if [ -z "$HUGGINGFACE_TOKEN" ]; then echo "Error: HUGGINGFACE_TOKEN is not set." && exit 1; fi && \
+    source /opt/conda/etc/profile.d/conda.sh && conda activate rap && \
+    huggingface-cli login --token $HUGGINGFACE_TOKEN
+
+WORKDIR /home/abhijit/Work/BridgeSim
+
+# Create the conda environment
+RUN conda create -n mdsn python=3.8 pip -y
+
+# Set the shell to use conda run for subsequent commands
+SHELL ["conda", "run", "-n", "mdsn", "/bin/bash", "-c"]
+
+WORKDIR /home/abhijit/Work/BridgeSim/metadrive
+
+RUN pip install -e .[cuda] && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install cupy-cuda12x && \
+    pip install cuda-python
+
+RUN sudo mkdir /usr/lib/dri
+RUN sudo ln -s /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so /usr/lib/dri/swrast_dri.so
+RUN sudo ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.30 /home/abhijit/.conda/envs/mdsn/lib/libstdc++.so.6
+
+# Set final working directory
+WORKDIR /home/abhijit/Work/BridgeSim
+
+# Default command to start an interactive shell
+CMD ["/bin/bash"]
