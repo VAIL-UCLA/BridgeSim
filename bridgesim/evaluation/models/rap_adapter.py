@@ -32,6 +32,7 @@ sys.path.insert(0, str(converters_bench2drive_path))
 from renderer import camera_params, convert_camera_params_to_simple_format
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 # RAP Model expects images in this order
@@ -41,14 +42,6 @@ CAM_ORDER = ['CAM_B0', 'CAM_F0', 'CAM_L0', 'CAM_R0']
 IMG_MEAN = torch.tensor([123.675, 116.28, 103.53], dtype=torch.float32).view(1, 3, 1, 1)
 IMG_STD = torch.tensor([58.395, 57.12, 57.375], dtype=torch.float32).view(1, 3, 1, 1)
 IMG_SCALE = 0.4
-
-# MetaDrive to RAP Command Mapping
-CMD_MAPPING = {
-    0: np.array([0, 1, 0, 0], dtype=np.float32),  # 0 -> Forward (mapped from 1-indexed)
-    1: np.array([1, 0, 0, 0], dtype=np.float32),  # 1 -> Left
-    2: np.array([0, 0, 1, 0], dtype=np.float32),  # 2 -> Right
-}
-DEFAULT_CMD = np.array([0, 1, 0, 0], dtype=np.float32)
 
 # Camera names for MetaDrive
 CAM_NAMES = ['CAM_F0', 'CAM_L0', 'CAM_R0', 'CAM_B0']
@@ -252,7 +245,7 @@ class RAPAdapter(BaseModelAdapter):
 
         # 3. Get command
         command = ego_state['command']
-        cmd_vec = CMD_MAPPING.get(command, DEFAULT_CMD)
+        cmd_vec = NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD)
 
         # 4. Prepare ego status
         curr_status = self._get_ego_status(vel_local, acc_local, cmd_vec)

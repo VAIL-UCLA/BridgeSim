@@ -10,6 +10,7 @@ import numpy as np
 from typing import Dict, Any
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 class EgoStatusMLPAdapter(BaseModelAdapter):
@@ -71,26 +72,8 @@ class EgoStatusMLPAdapter(BaseModelAdapter):
         return {}
 
     def _get_driving_command_onehot(self, command: int) -> np.ndarray:
-        """
-        Convert driving command to one-hot encoding.
-
-        Commands:
-            0: Left
-            1: Forward/Straight
-            2: Right
-            3: Unknown/LaneFollow (treated as forward)
-        """
-        # One-hot encoding for 4 command types
-        cmd_onehot = np.zeros(4, dtype=np.float32)
-        if command == 0:  # Left
-            cmd_onehot[0] = 1.0
-        elif command == 1:  # Forward
-            cmd_onehot[1] = 1.0
-        elif command == 2:  # Right
-            cmd_onehot[2] = 1.0
-        else:  # Unknown/LaneFollow -> Forward
-            cmd_onehot[1] = 1.0
-        return cmd_onehot
+        """Convert driving command to one-hot encoding using NAVSIM_CMD_MAPPING."""
+        return NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD).copy()
 
     def prepare_input(self,
                      images: Dict[str, np.ndarray],

@@ -16,15 +16,7 @@ from bridgesim.modelzoo.navsim.agents.diffusiondrive.transfuser_model_v2 import 
 from bridgesim.modelzoo.navsim.agents.diffusiondrive.transfuser_config import TransfuserConfig
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
-
-
-# Command Mapping
-CMD_MAPPING = {
-    0: np.array([1, 0, 0, 0], dtype=np.float32),  # Left
-    1: np.array([0, 1, 0, 0], dtype=np.float32),  # Forward
-    2: np.array([0, 0, 1, 0], dtype=np.float32),  # Right
-}
-DEFAULT_CMD = np.array([0, 1, 0, 0], dtype=np.float32)
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 class DiffusionDriveAdapter(BaseModelAdapter):
@@ -151,7 +143,7 @@ class DiffusionDriveAdapter(BaseModelAdapter):
         Format: [command(4), velocity(2), acceleration(2)]
         """
         # Command one-hot
-        cmd_vec = CMD_MAPPING.get(command, DEFAULT_CMD)
+        cmd_vec = NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD)
 
         # Velocity in local frame
         velocity = ego_state['velocity'][:2]

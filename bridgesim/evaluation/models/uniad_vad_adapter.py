@@ -15,12 +15,12 @@ from pyquaternion import Quaternion
 # Add bench2drive to path for plugin loading
 _bench2drive_root = Path(__file__).resolve().parent.parent.parent / "modelzoo" / "bench2drive"
 sys.path.insert(0, str(_bench2drive_root))
-from bridgesim.modelzoo.bench2drive.mmcv import Config
-from bridgesim.modelzoo.bench2drive.mmcv.models import build_model
-from bridgesim.modelzoo.bench2drive.mmcv.utils import load_checkpoint
-from bridgesim.modelzoo.bench2drive.mmcv.datasets.pipelines import Compose
-from bridgesim.modelzoo.bench2drive.mmcv.parallel.collate import collate as mm_collate_to_batch_form
-from bridgesim.modelzoo.bench2drive.mmcv.core.bbox import get_box_type
+from mmcv import Config
+from mmcv.models import build_model
+from mmcv.utils import load_checkpoint
+from mmcv.datasets.pipelines import Compose
+from mmcv.parallel.collate import collate as mm_collate_to_batch_form
+from mmcv.core.bbox import get_box_type
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 

@@ -25,16 +25,7 @@ from bridgesim.evaluation.utils import PIDController, PurePursuitController, Off
 from bridgesim.evaluation.utils.epdms_scorer_md import EPDMSScorer
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
-
-
-# RoadOption Enum
-VOID = -1
-LEFT = 1
-RIGHT = 2
-STRAIGHT = 3
-LANEFOLLOW = 4
-CHANGELANELEFT = 5
-CHANGELANERIGHT = 6
+from bridgesim.evaluation.utils.constants import VOID, LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
 
 
 class BaseEvaluator:
@@ -1566,8 +1557,7 @@ class BaseEvaluator:
 
             # Render DiffusionDriveV2-specific candidate visualizations
             # Use cached prediction pose (not current ego pose) so candidates stay anchored to prediction point
-            from bridgesim.evaluation.models.diffusiondrivev2_adapter import DiffusionDriveV2Adapter
-            if isinstance(self.model_adapter, DiffusionDriveV2Adapter) and self.cached_model_output is not None:
+            if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter' and self.cached_model_output is not None:
                 parsed = self.model_adapter.parse_output(self.cached_model_output, ego_state)
                 # Use prediction-time pose for candidate transformations
                 pred_pos = self.cached_prediction_position
@@ -1966,8 +1956,7 @@ class BaseEvaluator:
                     self.render_replan_summary(env, self._final_ego_position)
 
                 # Generate DiffusionDriveV2-specific candidate visualization GIFs
-                from bridgesim.evaluation.models.diffusiondrivev2_adapter import DiffusionDriveV2Adapter
-                if isinstance(self.model_adapter, DiffusionDriveV2Adapter):
+                if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter':
                     self.generate_gif(frame_ids, "topdown_topk_visualization.gif", "topdown_topk.png")
                     self.generate_gif(frame_ids, "topdown_finegrained_visualization.gif", "topdown_finegrained.png")
                     self.generate_gif(frame_ids, "topdown_coarse_visualization.gif", "topdown_coarse.png")

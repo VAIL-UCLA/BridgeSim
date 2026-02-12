@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 class LEADNavsimAdapter(BaseModelAdapter):
@@ -118,21 +119,8 @@ class LEADNavsimAdapter(BaseModelAdapter):
         return rgb_tensor
 
     def _get_command_onehot(self, command: int) -> np.ndarray:
-        """
-        Convert driving command to one-hot encoding.
-
-        NavSim commands: [left, straight, right, unknown]
-        """
-        cmd_onehot = np.zeros(4, dtype=np.float32)
-        if command == 0:  # Left
-            cmd_onehot[0] = 1.0
-        elif command == 1:  # Straight/Forward
-            cmd_onehot[1] = 1.0
-        elif command == 2:  # Right
-            cmd_onehot[2] = 1.0
-        else:  # Unknown/LaneFollow -> straight
-            cmd_onehot[1] = 1.0
-        return cmd_onehot
+        """Convert driving command to one-hot encoding using NAVSIM_CMD_MAPPING."""
+        return NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD).copy()
 
     def prepare_input(self,
                      images: Dict[str, np.ndarray],

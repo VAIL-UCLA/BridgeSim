@@ -5,7 +5,7 @@ This package provides consolidated camera parameters and training utilities used
 calibration, evaluation, and data conversion modules.
 """
 
-from .camera_utils import (
+from .utils.camera_utils import (
     # Bench2Drive 6-camera setup
     BENCH2DRIVE_CAM_NAMES,
     BENCH2DRIVE_LIDAR2IMG,
@@ -21,7 +21,7 @@ from .camera_utils import (
     calculate_fov_from_intrinsics,
 )
 
-from .training_utils import (
+from .utils.training_utils import (
     set_seed,
     BEV_MEAN,
     BEV_STD,

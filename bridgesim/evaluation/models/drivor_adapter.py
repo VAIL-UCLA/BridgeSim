@@ -17,19 +17,12 @@ from bridgesim.modelzoo.navsim.agents.drivoR.drivor_model import DrivoRModel
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 # Image Normalization Constants (ImageNet RGB)
 IMG_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMG_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-# Command Mapping (MetaDrive to DrivoR one-hot)
-CMD_MAPPING = {
-    0: np.array([0, 1, 0, 0], dtype=np.float32),  # 0 -> Forward
-    1: np.array([1, 0, 0, 0], dtype=np.float32),  # 1 -> Left
-    2: np.array([0, 0, 1, 0], dtype=np.float32),  # 2 -> Right
-}
-DEFAULT_CMD = np.array([0, 1, 0, 0], dtype=np.float32)
 
 
 def create_drivor_config(
@@ -347,7 +340,7 @@ class DrivoRAdapter(BaseModelAdapter):
             acc_local = np.array([0.0, 0.0], dtype=np.float32)
 
         # Command one-hot
-        cmd_vec = CMD_MAPPING.get(command, DEFAULT_CMD)
+        cmd_vec = NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD)
 
         # Combine: [pose(3), vel(2), acc(2), cmd(4)] = 11
         ego_status = np.concatenate([pose, vel_local, acc_local, cmd_vec]).astype(np.float32)

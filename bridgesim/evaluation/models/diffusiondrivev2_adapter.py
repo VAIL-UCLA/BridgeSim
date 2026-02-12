@@ -16,19 +16,12 @@ from bridgesim.modelzoo.navsim.agents.diffusiondrivev2.diffusiondrivev2_model_se
 from bridgesim.modelzoo.navsim.agents.diffusiondrivev2.diffusiondrivev2_sel_config import TransfuserConfig
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
 # Image Normalization Constants (RGB)
 IMG_MEAN = torch.tensor([123.675, 116.28, 103.53], dtype=torch.float32).view(1, 3, 1, 1)
 IMG_STD = torch.tensor([58.395, 57.12, 57.375], dtype=torch.float32).view(1, 3, 1, 1)
-
-# Command Mapping
-CMD_MAPPING = {
-    0: np.array([1, 0, 0, 0], dtype=np.float32),  # Left
-    1: np.array([0, 1, 0, 0], dtype=np.float32),  # Forward
-    2: np.array([0, 0, 1, 0], dtype=np.float32),  # Right
-}
-DEFAULT_CMD = np.array([0, 1, 0, 0], dtype=np.float32)
 
 
 class DiffusionDriveV2Adapter(BaseModelAdapter):
@@ -200,7 +193,7 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         Format: [command(4), velocity(2), acceleration(2)]
         """
         # Command one-hot
-        cmd_vec = CMD_MAPPING.get(command, DEFAULT_CMD)
+        cmd_vec = NAVSIM_CMD_MAPPING.get(command, DEFAULT_CMD)
 
         # Velocity in local frame
         velocity = ego_state['velocity'][:2]
