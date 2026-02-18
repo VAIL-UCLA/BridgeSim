@@ -199,7 +199,9 @@ class BaseEvaluator:
 
                     # Set position, heading, velocity, and angular velocity
                     # (same as MetaDrive's ReplayTrafficParticipantPolicy)
-                    ego_vehicle.set_position(log_state['position'])
+                    # Convert world coords to sim coords: sim = world - position_offset
+                    sim_position = log_state['position'][:2] - self.position_offset[:2]
+                    ego_vehicle.set_position(sim_position)
                     ego_vehicle.set_heading_theta(log_state['heading_theta'])
                     ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=True)
                     if 'angular_velocity' in log_state:
@@ -1788,8 +1790,8 @@ class BaseEvaluator:
                 # Store final ego position for replan summary visualization
                 self._final_ego_position = ego_state['position'].copy()
 
-                # Check termination
-                if (done or truncated) and not self.has_terminated:
+                # Check termination (ignore during ego replay phase)
+                if (done or truncated) and not self.has_terminated and frame_id >= self.ego_replay_frames:
                     self.has_terminated = True
                     print(f"Episode terminated at frame {frame_id}")
                     break

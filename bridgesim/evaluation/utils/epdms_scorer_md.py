@@ -37,7 +37,6 @@ class EPDMSScorer:
         if 'metadata' in scenario_data and 'timestep' in scenario_data['metadata']:
             timestep = scenario_data['metadata']['timestep']
             # Handle numpy array or scalar
-            import numpy as np
             if isinstance(timestep, np.ndarray):
                 if timestep.size == 1:
                     self.scenario_dt = float(timestep.item())
