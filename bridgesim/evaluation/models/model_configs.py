@@ -81,6 +81,11 @@ NAVSIMV2_MODELS = {
         "config": None,
         "description": "EgoStatusMLP blind baseline (no sensors, only ego state) trained on NavSim v2",
     },
+    "alpamayo_r1": {
+        "checkpoint": "nvidia/Alpamayo-R1-10B",
+        "config": None,
+        "description": "Alpamayo-R1 VLA model"
+    }
 }
 
 # Combined model configurations
