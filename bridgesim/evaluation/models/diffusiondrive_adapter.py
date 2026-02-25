@@ -17,6 +17,7 @@ from bridgesim.modelzoo.navsim.agents.diffusiondrive.transfuser_config import Tr
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 
 
 class DiffusionDriveAdapter(BaseModelAdapter):
@@ -26,17 +27,27 @@ class DiffusionDriveAdapter(BaseModelAdapter):
     DiffusionDrive uses diffusion-based trajectory generation with TransFuser backbone.
     """
 
-    def __init__(self, checkpoint_path: str, plan_anchor_path: str = None, **kwargs):
+    def __init__(self, checkpoint_path: str, plan_anchor_path: str = None,
+                 scorer=None, num_groups: int = 1, bev_calibrator=None, **kwargs):
         """
         Initialize DiffusionDrive adapter.
 
         Args:
             checkpoint_path: Path to checkpoint (.ckpt file)
             plan_anchor_path: Path to plan anchor numpy file
+            scorer: Optional BaseTrajectoryScorer instance for candidate selection.
+                    When set, uses forward_inference_scaling instead of regular forward.
+            num_groups: Number of groups for trajectory candidate generation.
+                        Total candidates = num_groups * 20. Only used when scorer is set.
+            bev_calibrator: Optional TransfuserBEVCalibrator for domain adaptation.
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.config = None
         self.plan_anchor_path = plan_anchor_path
+        self.scorer = scorer
+        self.num_groups = num_groups
+        self.bev_calibrator = bev_calibrator
+        self._current_frame_id = 0
 
     def load_model(self):
         """Load DiffusionDrive model from checkpoint."""
@@ -74,15 +85,17 @@ class DiffusionDriveAdapter(BaseModelAdapter):
         self.model.to(self.device)
         self.model.eval()
 
+        # Attach BEV calibrator if provided
+        if self.bev_calibrator is not None:
+            print("Loading BEV calibrator for DiffusionDrive...")
+            self.bev_calibrator.load_model()
+            self.model.bev_calibrator = self.bev_calibrator
+
         print("DiffusionDrive model loaded successfully.")
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """DiffusionDrive uses 3 cameras (left, front, right) stitched together."""
-        return {
-            'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-        }
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
@@ -174,6 +187,8 @@ class DiffusionDriveAdapter(BaseModelAdapter):
                      scenario_data: Dict[str, Any],
                      frame_id: int) -> Any:
         """Prepare input for DiffusionDrive model."""
+        self._current_frame_id = frame_id
+
         # 1. Preprocess images
         camera_feature = self._preprocess_images(images).unsqueeze(0).to(self.device)
 
@@ -194,13 +209,47 @@ class DiffusionDriveAdapter(BaseModelAdapter):
 
     def run_inference(self, model_input: Any) -> Any:
         """Run DiffusionDrive model inference."""
+        use_bev_calibrator = self.bev_calibrator is not None
         with torch.no_grad():
-            output = self.model(model_input, targets=None)
+            if self.scorer is not None:
+                output = self.model.forward_inference_scaling(
+                    model_input, num_groups=self.num_groups,
+                    use_bev_calibrator=use_bev_calibrator,
+                )
+            else:
+                output = self.model(model_input, targets=None,
+                                    use_bev_calibrator=use_bev_calibrator)
         return output
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Parse DiffusionDrive output."""
-        # Extract trajectory from output
+        if self.scorer is not None:
+            # Use scorer to select best trajectory from candidates
+            result = self.scorer.select_best(
+                model_output,
+                ego_state=ego_state,
+                frame_idx=self._current_frame_id,
+            )
+            trajectory = result["trajectory"][0].cpu().numpy()  # (T, 3)
+            traj_swapped = np.column_stack([trajectory[:, 1], trajectory[:, 0]])
+            parsed = {
+                'trajectory': traj_swapped,
+                'best_idx': result["best_idx"][0].item(),
+                'num_candidates': model_output["all_candidates"].shape[1],
+            }
+
+            # Include all candidates and scores for visualization
+            all_cands = model_output["all_candidates"][0].cpu().numpy()  # (N, 8, 3)
+            # Swap columns per candidate: [forward, lateral] -> [lateral, forward]
+            cands_swapped = np.stack([
+                np.column_stack([c[:, 1], c[:, 0]]) for c in all_cands
+            ])  # (N, 8, 2)
+            parsed['trajectory_coarse'] = cands_swapped
+            parsed['coarse_scores'] = result["scores"][0].cpu().numpy()  # (N,)
+
+            return parsed
+
+        # Existing behavior: extract trajectory from output
         trajectory = model_output["trajectory"][0].cpu().numpy()  # (T, 3) -> (x, y, heading)
 
         print(f"[DD DEBUG] Raw trajectory shape: {trajectory.shape}")

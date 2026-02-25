@@ -182,8 +182,16 @@ class UniADVADAdapter(BaseModelAdapter):
         command = ego_state['command']
         if command < 0:
             command = 4
-        results['command'] = command
-        results['ego_fut_cmd'] = np.array([command], dtype=np.int64)
+        if self.model_type == "vad":
+            # VAD uses 6-dim one-hot command encoding
+            one_hot = np.zeros(6, dtype=np.float64)
+            one_hot[command] = 1.0
+            results['command'] = one_hot
+            results['ego_fut_cmd'] = one_hot
+        else:
+            # UniAD uses scalar command
+            results['command'] = command
+            results['ego_fut_cmd'] = np.array([command], dtype=np.int64)
 
         # Ego2world transform
         ego2world = np.eye(4)
@@ -256,9 +264,15 @@ class UniADVADAdapter(BaseModelAdapter):
                     ego_fut_cmd_val = ego_fut_cmd_container
 
                 if torch.is_tensor(ego_fut_cmd_val):
-                    ego_fut_cmd_val = ego_fut_cmd_val.cpu().item() if ego_fut_cmd_val.numel() == 1 else ego_fut_cmd_val.cpu().numpy()[0]
+                    if ego_fut_cmd_val.numel() == 1:
+                        ego_fut_cmd_val = ego_fut_cmd_val.cpu().item()
+                    else:
+                        ego_fut_cmd_val = int(ego_fut_cmd_val.cpu().argmax().item())
                 elif isinstance(ego_fut_cmd_val, np.ndarray):
-                    ego_fut_cmd_val = int(ego_fut_cmd_val.flat[0])
+                    if ego_fut_cmd_val.size == 1:
+                        ego_fut_cmd_val = int(ego_fut_cmd_val.flat[0])
+                    else:
+                        ego_fut_cmd_val = int(np.argmax(ego_fut_cmd_val))
                 else:
                     ego_fut_cmd_val = int(ego_fut_cmd_val)
 

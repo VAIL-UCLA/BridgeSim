@@ -18,6 +18,7 @@ from bridgesim.modelzoo.navsim.agents.transfuser.transfuser_model import Transfu
 from bridgesim.modelzoo.navsim.agents.transfuser.transfuser_config import TransfuserConfig
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
@@ -71,11 +72,7 @@ class LTFAdapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """LTF uses 3 cameras (left, front, right) stitched together."""
-        return {
-            'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-        }
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """

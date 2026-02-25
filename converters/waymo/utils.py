@@ -26,6 +26,22 @@ from metadrive.type import MetaDriveType
 SPLIT_KEY = "|"
 
 
+def global_velocity_to_local(velocity_xy, heading):
+    """
+    Convert world-frame XY velocity to ego local frame [forward, lateral].
+    """
+    velocity_xy = np.asarray(velocity_xy, dtype=np.float32)
+    cos_h = np.cos(-heading)
+    sin_h = np.sin(-heading)
+    return np.array(
+        [
+            cos_h * velocity_xy[0] - sin_h * velocity_xy[1],
+            sin_h * velocity_xy[0] + cos_h * velocity_xy[1],
+        ],
+        dtype=np.float32,
+    )
+
+
 def extract_poly(message):
     x = [i.x for i in message]
     y = [i.y for i in message]
@@ -148,6 +164,7 @@ def extract_driveway(f):
 
 def extract_tracks(tracks, sdc_idx, track_length):
     ret = dict()
+    sdc_id = str(tracks[sdc_idx].id)
 
     def _object_state_template(object_id):
         return dict(
@@ -195,8 +212,11 @@ def extract_tracks(tracks, sdc_idx, track_length):
             # heading = [state.heading for state in obj.states]
             obj_state["state"]["heading"][step_count] = state.heading
 
-            obj_state["state"]["velocity"][step_count][0] = state.velocity_x
-            obj_state["state"]["velocity"][step_count][1] = state.velocity_y
+            velocity_xy = np.array([state.velocity_x, state.velocity_y], dtype=np.float32)
+            if object_id == sdc_id:
+                # Evaluator replay expects ego velocity in local frame.
+                velocity_xy = global_velocity_to_local(velocity_xy, state.heading)
+            obj_state["state"]["velocity"][step_count] = velocity_xy
 
             obj_state["state"]["valid"][step_count] = state.valid
 
@@ -204,7 +224,7 @@ def extract_tracks(tracks, sdc_idx, track_length):
 
         ret[object_id] = obj_state
 
-    return ret, str(tracks[sdc_idx].id)
+    return ret, sdc_id
 
 
 def extract_map_features(map_features):
@@ -356,6 +376,31 @@ def compute_width(map):
     return
 
 
+def _centralize_track_positions(tracks, scenario_center_3d):
+    """Translate all valid track positions into scenario-local coordinates."""
+    for track in tracks.values():
+        state = track["state"]
+        valid_mask = state["valid"]
+        state["position"][valid_mask] = state["position"][valid_mask] - scenario_center_3d
+
+
+def _centralize_map_features(map_features, scenario_center_3d):
+    """Translate map feature geometry into scenario-local coordinates."""
+    for feature in map_features.values():
+        if "polyline" in feature:
+            feature["polyline"] = feature["polyline"] - scenario_center_3d
+        if "polygon" in feature:
+            feature["polygon"] = feature["polygon"] - scenario_center_3d
+        if "position" in feature:
+            feature["position"] = feature["position"] - scenario_center_3d
+
+
+def _centralize_dynamic_map_states(dynamic_states, scenario_center_3d):
+    """Translate traffic light stop points into scenario-local coordinates."""
+    for state in dynamic_states.values():
+        state["stop_point"] = state["stop_point"] - scenario_center_3d
+
+
 def convert_waymo_scenario(scenario, version):
     scenario = scenario
     md_scenario = SD()
@@ -372,16 +417,21 @@ def convert_waymo_scenario(scenario, version):
     track_length = len(list(scenario.timestamps_seconds))
 
     tracks, sdc_id = extract_tracks(scenario.tracks, scenario.sdc_track_index, track_length)
+    scenario_center_3d = tracks[sdc_id]["state"]["position"][0].copy().astype("float32")
+
+    _centralize_track_positions(tracks, scenario_center_3d)
 
     md_scenario[SD.LENGTH] = track_length
 
     md_scenario[SD.TRACKS] = tracks
 
     dynamic_states = extract_dynamic_map_states(scenario.dynamic_map_states, track_length)
+    _centralize_dynamic_map_states(dynamic_states, scenario_center_3d)
 
     md_scenario[SD.DYNAMIC_MAP_STATES] = dynamic_states
 
     map_features = extract_map_features(scenario.map_features)
+    _centralize_map_features(map_features, scenario_center_3d)
     md_scenario[SD.MAP_FEATURES] = map_features
 
     compute_width(md_scenario[SD.MAP_FEATURES])
@@ -396,6 +446,7 @@ def convert_waymo_scenario(scenario, version):
     md_scenario[SD.METADATA]["scenario_id"] = scenario.scenario_id[:id_end]
     md_scenario[SD.METADATA]["source_file"] = scenario.scenario_id[id_end + 1:]
     md_scenario[SD.METADATA]["track_length"] = track_length
+    md_scenario[SD.METADATA]["scenario_center"] = scenario_center_3d
 
     # === Waymo specific data. Storing them here ===
     md_scenario[SD.METADATA]["current_time_index"] = scenario.current_time_index

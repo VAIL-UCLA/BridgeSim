@@ -34,8 +34,10 @@ class EPDMSScorer:
         
         # --- Time Step Alignment ---
         self.scenario_dt = 0.1
-        if 'metadata' in scenario_data and 'timestep' in scenario_data['metadata']:
-            timestep = scenario_data['metadata']['timestep']
+        metadata = scenario_data.get('metadata', {})
+        ts_key = 'timestep' if 'timestep' in metadata else 'ts'
+        if ts_key in metadata:
+            timestep = metadata[ts_key]
             # Handle numpy array or scalar
             if isinstance(timestep, np.ndarray):
                 if timestep.size == 1:
@@ -43,6 +45,9 @@ class EPDMSScorer:
                 elif timestep.size > 1:
                     # Take first element or compute mean difference
                     self.scenario_dt = float(timestep.flat[0]) if timestep.flat[0] > 0 else 0.1
+            elif isinstance(timestep, (list, tuple)):
+                val = timestep[0] if len(timestep) > 0 else 0.1
+                self.scenario_dt = float(val) if float(val) > 0 else 0.1
             else:
                 self.scenario_dt = float(timestep)
         self.planner_dt = 0.5

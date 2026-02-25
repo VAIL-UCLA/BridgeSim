@@ -15,6 +15,7 @@ from typing import Dict, Any
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 
 
 class LEADNavsimAdapter(BaseModelAdapter):
@@ -74,12 +75,7 @@ class LEADNavsimAdapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """LEAD NavSim uses 4 cameras."""
-        return {
-            'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_B0': {'x': -1.3, 'y': 0.0, 'z': 2.3, 'yaw': 180.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 110, 'width': 1920, 'height': 1080},
-        }
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0', 'CAM_B0')}
 
     def _preprocess_rgb(self, camera_images: Dict[str, np.ndarray]) -> torch.Tensor:
         """

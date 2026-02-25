@@ -713,7 +713,13 @@ def convert_scenario(input_path: str, output_path: str, map_root: str, render: b
 
         tracks["ego"]["state"]["position"][frame_idx] = ego_pos_local
         tracks["ego"]["state"]["heading"][frame_idx] = ego_yaw
-        tracks["ego"]["state"]["velocity"][frame_idx] = frame["ego_dynamic_state"][:2]
+        # Convert ego velocity from local (body) frame to global frame
+        # ego_dynamic_state[:2] is [forward_vel, lateral_vel] in vehicle body frame
+        local_vel = frame["ego_dynamic_state"][:2]
+        cos_h, sin_h = np.cos(ego_yaw), np.sin(ego_yaw)
+        global_vx = cos_h * local_vel[0] - sin_h * local_vel[1]
+        global_vy = sin_h * local_vel[0] + cos_h * local_vel[1]
+        tracks["ego"]["state"]["velocity"][frame_idx] = np.array([global_vx, global_vy])
         tracks["ego"]["state"]["valid"][frame_idx] = 1
         tracks["ego"]["state"]["length"][frame_idx] = 4.0
         tracks["ego"]["state"]["width"][frame_idx] = 1.8

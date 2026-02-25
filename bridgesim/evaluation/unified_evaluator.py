@@ -8,25 +8,56 @@ import os
 import sys
 from pathlib import Path
 
-# Initialize CUDA device BEFORE any imports that might use CUDA
-if 'CUDA_VISIBLE_DEVICES' in os.environ:
-    try:
-        from cuda import cudart
-        # cudaSetDevice returns a tuple (error_code, )
-        err, = cudart.cudaSetDevice(0)
-        if err == cudart.cudaError_t.cudaSuccess:
-            print("[Early init] CUDA runtime device set to 0")
-        else:
-            print(f"[Early init] Warning: Failed to set CUDA runtime device: {err}")
-    except Exception as e:
-        # Pass silently if cuda-python is not installed or other errors occur
-        # The main code will handle device placement via PyTorch
-        pass
-
 # Add evaluation to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridgesim.evaluation.core.base_evaluator import BaseEvaluator
+
+
+def create_trajectory_scorer(args):
+    """Create trajectory scorer based on args. Returns None if no scorer requested."""
+    scorer_name = args.trajectory_scorer
+    if scorer_name is None:
+        return None
+
+    model_type = args.model_type.lower()
+
+    if scorer_name == "confidence":
+        from bridgesim.evaluation.scorers import ConfidenceScorer
+        print("Creating ConfidenceScorer for trajectory selection")
+        return ConfidenceScorer()
+
+    elif scorer_name == "coarse_topk":
+        from bridgesim.evaluation.scorers import CoarseTopKScorer
+        v2_ckpt = args.v2_scorer_checkpoint
+        if model_type == "diffusiondrive" and v2_ckpt is None:
+            raise ValueError(
+                "--v2-scorer-checkpoint is required when using "
+                "--trajectory-scorer coarse_topk with DiffusionDrive v1."
+            )
+        print(f"Creating CoarseTopKScorer (v2_checkpoint={v2_ckpt})")
+        return CoarseTopKScorer(
+            v2_scorer_checkpoint_path=v2_ckpt,
+            device="cuda",
+        )
+
+    elif scorer_name == "epdms":
+        from bridgesim.evaluation.scorers import EPDMSTrajectoryScorer
+        print("Creating EPDMSTrajectoryScorer (will be initialized after env setup)")
+        return EPDMSTrajectoryScorer()
+
+    elif scorer_name == "epdms_fast":
+        from bridgesim.evaluation.scorers import EPDMSTrajectoryScorer_Fast
+        print("Creating EPDMSTrajectoryScorer_Fast (will be initialized after env setup)")
+        return EPDMSTrajectoryScorer_Fast()
+
+    elif scorer_name == "epdms_ego":
+        from bridgesim.evaluation.scorers import EPDMSEgoScorer
+        print("Creating EPDMSEgoScorer (will be initialized after env setup)")
+        return EPDMSEgoScorer()
+
+    else:
+        raise ValueError(f"Unknown trajectory scorer: {scorer_name}")
 
 
 def create_model_adapter(args):
@@ -45,8 +76,8 @@ def create_model_adapter(args):
                 use_ema=args.bev_use_ema,
                 device="cuda"
             )
-        elif model_type == "diffusiondrivev2":
-            # DiffusionDriveV2 uses TransFuser BEV calibrator (512 channels, 8x8)
+        elif model_type in ["diffusiondrive", "diffusiondrivev2", "transfuser"]:
+            # DiffusionDrive v1/v2 use TransFuser BEV calibrator (512 channels, 8x8)
             from bridgesim.evaluation.features.transfuser_bev_calibrator import create_transfuser_bev_calibrator
             print(f"Creating TransFuser BEV calibrator with checkpoint: {args.bev_calibrator_checkpoint}")
             bev_calibrator = create_transfuser_bev_calibrator(
@@ -113,7 +144,10 @@ def create_model_adapter(args):
 
     elif model_type == "transfuser":
         from bridgesim.evaluation.models.transfuser_adapter import TransfuserAdapter
-        return TransfuserAdapter(checkpoint_path=args.checkpoint)
+        return TransfuserAdapter(
+            checkpoint_path=args.checkpoint,
+            bev_calibrator=bev_calibrator,
+        )
 
     elif model_type == "ltf":
         from bridgesim.evaluation.models.ltf_adapter import LTFAdapter
@@ -125,16 +159,25 @@ def create_model_adapter(args):
 
     elif model_type == "diffusiondrive":
         from bridgesim.evaluation.models.diffusiondrive_adapter import DiffusionDriveAdapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else (1 if scorer is None else 1)
         return DiffusionDriveAdapter(
             checkpoint_path=args.checkpoint,
-            plan_anchor_path=args.plan_anchor_path
+            plan_anchor_path=args.plan_anchor_path,
+            scorer=scorer,
+            num_groups=num_groups,
+            bev_calibrator=bev_calibrator,
         )
 
     elif model_type == "diffusiondrivev2":
         from bridgesim.evaluation.models.diffusiondrivev2_adapter import DiffusionDriveV2Adapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else (10 if scorer is not None else 10)
         return DiffusionDriveV2Adapter(
             checkpoint_path=args.checkpoint,
             plan_anchor_path=args.plan_anchor_path,
+            scorer=scorer,
+            num_groups=num_groups,
             bev_calibrator=bev_calibrator,
             enable_temporal_consistency=args.enable_temporal_consistency,
             temporal_alpha=args.temporal_alpha,
@@ -192,7 +235,7 @@ def main():
         "--image-source",
         type=str,
         default="metadrive",
-        choices=["rasterized", "metadrive"],
+        choices=["rasterized", "metadrive", "rasterized_3d"],
         help="RAP image source (only used for RAP model)"
     )
     parser.add_argument(
@@ -200,6 +243,33 @@ def main():
         type=str,
         default=None,
         help="Path to plan anchor file (for DiffusionDrive/V2 models)"
+    )
+
+    # Inference scaling parameters (for DiffusionDrive/V2)
+    parser.add_argument(
+        "--trajectory-scorer",
+        type=str,
+        default=None,
+        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego"],
+        help="Trajectory scorer for inference scaling (for DiffusionDrive/V2). "
+             "'confidence' uses poses_cls (v1 only). "
+             "'coarse_topk' uses v2 learned coarse scorer (v1 needs --v2-scorer-checkpoint). "
+             "'epdms' uses evaluator EPDMS scorer (not yet implemented)."
+    )
+    parser.add_argument(
+        "--num-groups",
+        type=int,
+        default=None,
+        help="Number of groups for trajectory candidate generation. "
+             "Total candidates = num_groups * 20. Only used with --trajectory-scorer. "
+             "(default: 1 for v1, 10 for v2)"
+    )
+    parser.add_argument(
+        "--v2-scorer-checkpoint",
+        type=str,
+        default=None,
+        help="Path to DiffusionDrive v2 checkpoint for loading coarse scorer weights. "
+             "Required when using --trajectory-scorer coarse_topk with DiffusionDrive v1."
     )
 
     # Temporal consistency parameters (for DiffusionDriveV2)
@@ -441,6 +511,9 @@ def main():
     # Format: {output_dir}/{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames}[_ta{temporal_alpha}_th{temporal_max_history}]/
     eval_frames_str = str(args.eval_frames) if args.eval_frames is not None else "None"
     output_subdir = f"{args.model_type}_rr{args.replan_rate}_erf{args.ego_replay_frames}_ef{eval_frames_str}"
+    if args.trajectory_scorer:
+        ng = args.num_groups if args.num_groups is not None else (1 if args.model_type == "diffusiondrive" else 10)
+        output_subdir += f"_scorer_{args.trajectory_scorer}_ng{ng}"
     if args.enable_temporal_consistency:
         output_subdir += f"_ta{args.temporal_alpha}_th{args.temporal_max_history}"
     full_output_dir = os.path.join(args.output_dir, output_subdir)

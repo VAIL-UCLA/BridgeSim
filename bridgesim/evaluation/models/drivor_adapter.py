@@ -17,6 +17,7 @@ from bridgesim.modelzoo.navsim.agents.drivoR.drivor_model import DrivoRModel
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
@@ -245,24 +246,10 @@ class DrivoRAdapter(BaseModelAdapter):
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """Return camera configuration for DrivoR."""
         if self.num_cameras == 4:
-            return {
-                'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_B0': {'x': -1.3, 'y': 0.0, 'z': 2.3, 'yaw': 180.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 110, 'width': 1920, 'height': 1080},
-            }
+            return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0', 'CAM_B0')}
         else:
             # 8 camera configuration
-            return {
-                'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_L1': {'x': 0.0, 'y': -0.8, 'z': 2.3, 'yaw': -90.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_L2': {'x': -1.0, 'y': -0.5, 'z': 2.3, 'yaw': -135.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_R1': {'x': 0.0, 'y': 0.8, 'z': 2.3, 'yaw': 90.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_R2': {'x': -1.0, 'y': 0.5, 'z': 2.3, 'yaw': 135.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-                'CAM_B0': {'x': -1.3, 'y': 0.0, 'z': 2.3, 'yaw': 180.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 110, 'width': 1920, 'height': 1080},
-            }
+            return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_L1', 'CAM_L2', 'CAM_R0', 'CAM_R1', 'CAM_R2', 'CAM_B0')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
