@@ -2,6 +2,8 @@
 
 # Single scenario evaluation script
 # Usage: bash run_eval.sh [model_type] [scenario_path] [gpu_id]
+SCENARIO_PATH="${2:-}"
+SCENARIO_PATH=$(realpath "$SCENARIO_PATH")
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
@@ -11,7 +13,7 @@ export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/metadrive:$PYTHONPATH"
 # Configuration
 GPU_ID="${3:-${GPU_ID:-0}}"
 MODEL_TYPE="${1:-transfuser}"
-SCENARIO_PATH="${2:-}"
+
 OUTPUT_BASE="${REPO_ROOT}/outputs/single_eval"
 TRAFFIC_MODE="IDM"  # Options: no_traffic, log_replay, IDM
 

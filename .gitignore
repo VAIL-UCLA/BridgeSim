@@ -54,6 +54,7 @@ env/
 ENV/
 env.bak/
 .venv/
+env.sh
 
 # IDE and Editor files
 .vscode/
@@ -107,3 +108,7 @@ tensorboard_logs/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# outputs
+outputs/
+train.sh

@@ -1155,6 +1155,8 @@ if __name__ == "__main__":
                     import traceback
                     traceback.print_exc()
                     continue
+                
+                # total_scenes_converted += 1
 
             # Free memory after processing each log file
             del frames

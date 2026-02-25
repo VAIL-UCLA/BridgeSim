@@ -47,7 +47,18 @@ def create_drivor_config(
         OmegaConf configuration object
     """
     # Default camera configuration based on num_cameras
-    if num_cameras == 4:
+    if num_cameras == 1:
+        cam_config = {
+            "cam_f0": [3],  # front
+            "cam_l0": [],  # left
+            "cam_l1": [],
+            "cam_l2": [],
+            "cam_r0": [],  # right
+            "cam_r1": [],
+            "cam_r2": [],
+            "cam_b0": [],  # back
+        }
+    elif num_cameras == 4:
         cam_config = {
             "cam_f0": [3],  # front
             "cam_l0": [3],  # left
@@ -197,7 +208,9 @@ class DrivoRAdapter(BaseModelAdapter):
         self.config = None
 
         # Camera order for processing (front first, then others)
-        if num_cameras == 4:
+        if num_cameras == 1:
+            self.cam_order = ['CAM_F0']
+        elif num_cameras == 4:
             self.cam_order = ['CAM_F0', 'CAM_B0', 'CAM_L0', 'CAM_R0']
         else:
             self.cam_order = ['CAM_F0', 'CAM_B0', 'CAM_L0', 'CAM_L1', 'CAM_L2', 'CAM_R0', 'CAM_R1', 'CAM_R2']
@@ -245,7 +258,10 @@ class DrivoRAdapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """Return camera configuration for DrivoR."""
-        if self.num_cameras == 4:
+
+        if self.num_cameras == 1:
+            return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0')}
+        elif self.num_cameras == 4:
             return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0', 'CAM_B0')}
         else:
             # 8 camera configuration

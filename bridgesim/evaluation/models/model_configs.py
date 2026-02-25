@@ -56,6 +56,11 @@ NAVSIMV2_MODELS = {
         "config": None,
         "description": "DrivoR model trained on NavSim v2",
     },
+    "drivor_front": {
+        "checkpoint": os.path.join(CKPT_BASE, "navsimv2/DrivoR/drivor_front_Nav2_10epochs.pth"),
+        "config": None,
+        "description": "DrivoR front model trained on NavSim v2",
+    },
     "lead_navsim": {
         "checkpoint": os.path.join(CKPT_BASE, "navsimv2/LEAD_navsim/model_0060.pth"),
         "config": None,

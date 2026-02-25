@@ -277,6 +277,8 @@ class BaseEvaluator:
         
         scenario_subfolder = self.scenario_path / f"{self.scenario_name}_0"
         scenario_pkl_files = list(scenario_subfolder.glob("*.pkl"))
+        # scenario_subfolder = self.scenario_path
+        # scenario_pkl_files = list(scenario_subfolder.glob("sd_*.pkl"))
 
         if not scenario_pkl_files:
             raise FileNotFoundError(f"No .pkl file found in {scenario_subfolder}")

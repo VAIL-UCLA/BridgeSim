@@ -6,7 +6,8 @@ Features:
 - Progress tracking with ETA
 - Error handling and recovery
 - Result aggregation
-- Optional parallel processing
+- Optional parallel processing (MultiProcessBatchEvaluator)
+- Multi-GPU support with per-process GPU assignment
 - Resume capability
 """
 
@@ -15,10 +16,13 @@ import sys
 import json
 import argparse
 import subprocess
+import multiprocessing
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import threading
 import time
 import numpy as np
 
@@ -113,6 +117,13 @@ class BatchEvaluator:
         self.temporal_sigma = temporal_sigma
         self.consensus_temperature = consensus_temperature
 
+        # 
+        eval_frames_str = str(self.eval_frames) if self.eval_frames is not None else "None"
+        output_subdir = f"{self.model_type}_rr{self.replan_rate}_erf{self.ego_replay_frames}_ef{eval_frames_str}"
+        if self.enable_temporal_consistency:
+            output_subdir += f"_ta{self.temporal_alpha}_th{self.temporal_max_history}"
+        self.output_root = self.output_root / output_subdir
+        
         # Create output directories
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.log_dir = self.output_root / "logs"
@@ -173,6 +184,14 @@ class BatchEvaluator:
             if scenarios:
                 print(f"Found {len(scenarios)} scenarios to evaluate (after filtering completed)")
 
+        # import json
+        # # filter_path = "/share/user/lm/26winter/BridgeSim/converted_scenarios/drivor_navsim_high_ade.json"
+        # filter_path = "/share/user/lm/26winter/BridgeSim/converted_scenarios/drivor_navsim_low_score.json"
+        # navsim_test_hard = json.load(open(filter_path, "r"))
+        # navsim_test_hard_scenarios = list(navsim_test_hard.keys())
+        # breakpoint()
+        # scenarios = [s for s in scenarios if s.name.split("_")[1] in navsim_test_hard_scenarios]
+        
         return scenarios
 
     def evaluate_scenario(self, scenario_path: Path) -> Dict[str, Any]:
@@ -567,6 +586,411 @@ class BatchEvaluator:
         print(f"{'='*60}\n")
 
 
+# Module-level reference to the shared GPU queue, set by each worker process
+# via the initializer. This avoids pickling issues with multiprocessing.Queue.
+_gpu_queue: multiprocessing.Queue = None
+
+
+def _worker_init(gpu_queue: multiprocessing.Queue):
+    """ProcessPoolExecutor initializer: store the shared GPU queue in each worker."""
+    global _gpu_queue
+    _gpu_queue = gpu_queue
+
+
+def _evaluate_scenario_worker(args_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Worker function for multi-process scenario evaluation.
+
+    This is a module-level function (required for pickling by ProcessPoolExecutor).
+    It grabs a GPU ID from the shared GPU pool queue, runs the scenario, and
+    returns the GPU ID to the pool when done (regardless of success/failure).
+
+    Args:
+        args_dict: Dictionary containing all parameters needed to evaluate a scenario.
+
+    Returns:
+        Dictionary with scenario_name and evaluation result.
+    """
+    scenario_path = Path(args_dict['scenario_path'])
+    scenario_name = scenario_path.name
+    log_dir = Path(args_dict['log_dir'])
+    output_root = Path(args_dict['output_root'])
+    eval_dir = args_dict['eval_dir']
+    cmd = args_dict['cmd']
+
+    log_file = log_dir / f"{scenario_name}.log"
+
+    # Grab a GPU from the shared pool (blocks until one is available)
+    gpu_id = _gpu_queue.get()
+
+    # Set CUDA_VISIBLE_DEVICES for this subprocess so unified_evaluator
+    # initializes on the correct GPU
+    env = os.environ.copy()
+    env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+
+    start_time = time.time()
+    try:
+        with open(log_file, 'w') as f:
+            result = subprocess.run(
+                cmd,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                cwd=eval_dir,
+                timeout=3600,  # 1 hour timeout per scenario
+                env=env,
+            )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            # Build the output subdirectory path (mirrors BatchEvaluator logic)
+            # model_type = args_dict['model_type']
+            # replan_rate = args_dict['replan_rate']
+            # ego_replay_frames = args_dict['ego_replay_frames']
+            # eval_frames = args_dict['eval_frames']
+            # enable_temporal_consistency = args_dict['enable_temporal_consistency']
+            # temporal_alpha = args_dict['temporal_alpha']
+            # temporal_max_history = args_dict['temporal_max_history']
+
+            # eval_frames_str = str(eval_frames) if eval_frames is not None else "None"
+            # output_subdir = f"{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames_str}"
+            # if enable_temporal_consistency:
+            #     output_subdir += f"_ta{temporal_alpha}_th{temporal_max_history}"
+            # full_output_dir = Path(output_root) / output_subdir / scenario_name
+            # results_file = full_output_dir / "evaluation_results.json"
+            results_file = Path(output_root) / scenario_name / "evaluation_results.json"
+
+            if results_file.exists():
+                with open(results_file, 'r') as f:
+                    eval_results = json.load(f)
+                return {
+                    'scenario_name': scenario_name,
+                    'result': {
+                        'status': 'success',
+                        'duration': duration,
+                        'exit_code': 0,
+                        'gpu_id': gpu_id,
+                        'log_file': str(log_file),
+                        'results': eval_results,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                }
+            else:
+                return {
+                    'scenario_name': scenario_name,
+                    'result': {
+                        'status': 'error',
+                        'duration': duration,
+                        'exit_code': 0,
+                        'gpu_id': gpu_id,
+                        'error': 'Results file not found',
+                        'log_file': str(log_file),
+                        'timestamp': datetime.now().isoformat()
+                    }
+                }
+        else:
+            return {
+                'scenario_name': scenario_name,
+                'result': {
+                    'status': 'failed',
+                    'duration': duration,
+                    'exit_code': result.returncode,
+                    'gpu_id': gpu_id,
+                    'log_file': str(log_file),
+                    'timestamp': datetime.now().isoformat()
+                }
+            }
+
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
+        return {
+            'scenario_name': scenario_name,
+            'result': {
+                'status': 'timeout',
+                'duration': duration,
+                'gpu_id': gpu_id,
+                'error': 'Evaluation timeout (1 hour)',
+                'log_file': str(log_file),
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+    except Exception as e:
+        duration = time.time() - start_time
+        return {
+            'scenario_name': scenario_name,
+            'result': {
+                'status': 'error',
+                'duration': duration,
+                'gpu_id': gpu_id,
+                'error': str(e),
+                'log_file': str(log_file),
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+    finally:
+        # Always return the GPU to the pool so other workers can use it
+        _gpu_queue.put(gpu_id)
+
+
+class MultiProcessBatchEvaluator(BatchEvaluator):
+    """
+    Multi-process batch evaluator that runs multiple scenarios in parallel,
+    each on a designated GPU.
+
+    Inherits all configuration and result-handling from BatchEvaluator.
+    Overrides the `run` method to distribute scenarios across worker processes,
+    assigning GPUs round-robin from the available GPU list.
+
+    Example usage:
+        evaluator = MultiProcessBatchEvaluator(
+            model_type="uniad",
+            checkpoint_path="/path/to/ckpt",
+            scenario_root="/path/to/scenarios",
+            output_root="/path/to/output",
+            num_gpus=4,          # Use 4 GPUs (IDs 0,1,2,3)
+            max_workers=8,       # Run 8 scenarios in parallel (2 per GPU)
+        )
+        evaluator.run()
+    """
+
+    def __init__(self,
+                 *args,
+                 num_gpus: int = 1,
+                 gpu_ids: Optional[List[int]] = None,
+                 chunk_num: int = 0,
+                 chunk_idx: int = 0,
+                 **kwargs):
+        """
+        Initialize multi-process batch evaluator.
+
+        Args:
+            *args: Positional arguments forwarded to BatchEvaluator.
+            num_gpus: Number of GPUs to use. Ignored if gpu_ids is provided.
+            gpu_ids: Explicit list of GPU IDs to use (e.g. [0, 2, 5]).
+                     If None, uses range(num_gpus).
+            chunk_num: Number of chunks to split the scenarios into.
+            chunk_idx: Index of the chunk to process.
+            **kwargs: Keyword arguments forwarded to BatchEvaluator.
+        """
+        super().__init__(*args, **kwargs)
+
+        if gpu_ids is not None:
+            self.gpu_ids = list(gpu_ids)
+        else:
+            self.gpu_ids = list(range(num_gpus))
+
+        if not self.gpu_ids:
+            raise ValueError("Must specify at least one GPU (num_gpus >= 1 or non-empty gpu_ids)")
+
+        # Default max_workers to number of GPUs if set to 1 (the BatchEvaluator default)
+        if self.max_workers <= 1:
+            self.max_workers = len(self.gpu_ids)
+            
+        self.chunk_num = chunk_num
+        self.chunk_idx = chunk_idx
+        
+    def get_scenarios(self) -> List[Path]:
+        """Get list of scenario directories."""
+        scenarios = [
+            d for d in sorted(self.scenario_root.iterdir())
+            if d.is_dir() and not d.name.startswith('.')
+        ]
+
+        # Filter out completed scenarios if resuming
+        if self.resume:
+            scenarios = [
+                s for s in scenarios
+                if s.name not in self.results['scenarios'] or
+                   self.results['scenarios'][s.name].get('status') != 'success'
+            ]
+            if scenarios:
+                print(f"Found {len(scenarios)} scenarios to evaluate (after filtering completed)")
+
+        # import json
+        # # filter_path = "/share/user/lm/26winter/BridgeSim/converted_scenarios/drivor_navsim_high_ade.json"
+        # filter_path = "/share/user/lm/26winter/BridgeSim/converted_scenarios/drivor_navsim_low_score.json"
+        # navsim_test_hard = json.load(open(filter_path, "r"))
+        # navsim_test_hard_scenarios = list(navsim_test_hard.keys())
+        # breakpoint()
+        # scenarios = [s for s in scenarios if s.name.split("_")[1] in navsim_test_hard_scenarios]
+        
+        # first sort scenarios, then split into chunks for distributed processing (if chunk_num > 1)
+        if self.chunk_num > 1:
+            scenarios = sorted(scenarios, key=lambda s: s.name)  # Ensure consistent ordering
+            total_scenarios = len(scenarios)
+            chunk_size = (total_scenarios + self.chunk_num - 1) // self.chunk_num  # ceil division
+            start_idx = self.chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, total_scenarios)
+            scenarios = scenarios[start_idx:end_idx]
+            print(f"Processing chunk {self.chunk_idx+1}/{self.chunk_num}: scenarios {start_idx} to {end_idx-1}")
+        
+        return scenarios
+
+    def _build_cmd(self, scenario_path: Path) -> List[str]:
+        """Build the unified_evaluator command for a scenario (same logic as BatchEvaluator.evaluate_scenario)."""
+        cmd = [
+            sys.executable,
+            "unified_evaluator.py",
+            "--model-type", self.model_type,
+            "--checkpoint", self.checkpoint_path,
+            "--scenario-path", str(scenario_path),
+            "--traffic-mode", self.traffic_mode,
+            "--output-dir", str(self.output_root),
+        ]
+
+        if self.config_path:
+            cmd.extend(["--config", self.config_path])
+        if self.plan_anchor_path:
+            cmd.extend(["--plan-anchor-path", self.plan_anchor_path])
+        if not self.save_perframe:
+            cmd.append("--no-save-perframe")
+        if self.enable_bev_calibrator:
+            cmd.append("--enable-bev-calibrator")
+            if self.bev_calibrator_checkpoint:
+                cmd.extend(["--bev-calibrator-checkpoint", self.bev_calibrator_checkpoint])
+            cmd.extend(["--bev-sample-steps", str(self.bev_sample_steps)])
+            if self.bev_use_ema:
+                cmd.append("--bev-use-ema")
+            else:
+                cmd.append("--bev-no-ema")
+        cmd.extend(["--controller", self.controller_type])
+        cmd.extend(["--replan-rate", str(self.replan_rate)])
+        cmd.extend(["--sim-dt", str(self.sim_dt)])
+        cmd.extend(["--ego-replay-frames", str(self.ego_replay_frames)])
+        if self.eval_frames is not None:
+            cmd.extend(["--eval-frames", str(self.eval_frames)])
+        cmd.extend(["--scorer-type", self.scorer_type])
+        if self.score_start_frame is not None:
+            cmd.extend(["--score-start-frame", str(self.score_start_frame)])
+        cmd.extend(["--eval-mode", self.eval_mode])
+        if self.enable_vis:
+            cmd.append("--enable-vis")
+        if self.enable_temporal_consistency:
+            cmd.append("--enable-temporal-consistency")
+            cmd.extend(["--temporal-alpha", str(self.temporal_alpha)])
+            cmd.extend(["--temporal-lambda", str(self.temporal_lambda)])
+            cmd.extend(["--temporal-max-history", str(self.temporal_max_history)])
+            cmd.extend(["--temporal-sigma", str(self.temporal_sigma)])
+            cmd.extend(["--consensus-temperature", str(self.consensus_temperature)])
+
+        return cmd
+
+    def run(self):
+        """Run batch evaluation using multiple processes with dynamic GPU assignment.
+
+        GPUs are managed via a shared multiprocessing.Queue that acts as a pool.
+        Each worker grabs a GPU before starting and returns it when done, so the
+        next available GPU always goes to the next job -- no static round-robin.
+        """
+        scenarios = self.get_scenarios()
+
+        if not scenarios:
+            print("No scenarios to evaluate!")
+            return
+
+        print(f"\n{'='*60}")
+        print(f"Starting Multi-Process Batch Evaluation")
+        print(f"{'='*60}")
+        print(f"Total scenarios: {len(scenarios)}")
+        print(f"Model: {self.model_type}")
+        print(f"Workers: {self.max_workers}")
+        print(f"GPUs: {self.gpu_ids}")
+        print(f"Output: {self.output_root}")
+        print(f"{'='*60}\n")
+
+        # Build a shared GPU pool queue.
+        # If max_workers > num_gpus, each GPU appears multiple times so that
+        # multiple workers can share the same GPU concurrently.
+        gpu_queue = multiprocessing.Queue()
+        slots_per_gpu = max(1, self.max_workers // len(self.gpu_ids))
+        # Distribute any remainder across GPUs so total slots == max_workers
+        remainder = self.max_workers - slots_per_gpu * len(self.gpu_ids)
+        for i, gpu_id in enumerate(self.gpu_ids):
+            n = slots_per_gpu + (1 if i < remainder else 0)
+            for _ in range(n):
+                gpu_queue.put(gpu_id)
+
+        # Prepare worker arguments for each scenario (no gpu_id -- assigned dynamically)
+        eval_dir = str(Path(__file__).parent)
+        worker_args_list = []
+        for scenario_path in scenarios:
+            cmd = self._build_cmd(scenario_path)
+            worker_args_list.append({
+                'scenario_path': str(scenario_path),
+                'log_dir': str(self.log_dir),
+                'output_root': str(self.output_root),
+                'eval_dir': eval_dir,
+                'cmd': cmd,
+                # Fields needed for output path construction
+                'model_type': self.model_type,
+                'replan_rate': self.replan_rate,
+                'ego_replay_frames': self.ego_replay_frames,
+                'eval_frames': self.eval_frames,
+                'enable_temporal_consistency': self.enable_temporal_consistency,
+                'temporal_alpha': self.temporal_alpha,
+                'temporal_max_history': self.temporal_max_history,
+            })
+
+        # Lock for thread-safe results updates (ProcessPoolExecutor callbacks
+        # run on threads in the main process)
+        results_lock = threading.Lock()
+
+        # Run scenarios in parallel using ProcessPoolExecutor.
+        # The gpu_queue is passed via the initializer so it doesn't need pickling
+        # per task submission.
+        with ProcessPoolExecutor(
+            max_workers=self.max_workers,
+            initializer=_worker_init,
+            initargs=(gpu_queue,),
+        ) as executor:
+            future_to_scenario = {
+                executor.submit(_evaluate_scenario_worker, args): args['scenario_path']
+                for args in worker_args_list
+            }
+
+            pbar = tqdm(total=len(scenarios), desc="Evaluating scenarios")
+            for future in as_completed(future_to_scenario):
+                try:
+                    worker_result = future.result()
+                except Exception as e:
+                    scenario_path = future_to_scenario[future]
+                    scenario_name = Path(scenario_path).name
+                    worker_result = {
+                        'scenario_name': scenario_name,
+                        'result': {
+                            'status': 'error',
+                            'duration': 0,
+                            'error': f'Worker exception: {e}',
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    }
+
+                scenario_name = worker_result['scenario_name']
+                result = worker_result['result']
+
+                with results_lock:
+                    self.results['scenarios'][scenario_name] = result
+                    self.save_results()
+
+                status_symbol = {
+                    'success': '✓', 'failed': '✗', 'error': '⚠', 'timeout': '⏱'
+                }.get(result['status'], '?')
+                gpu_info = f" [GPU {result.get('gpu_id', '?')}]"
+                tqdm.write(
+                    f"{status_symbol} {scenario_name}: {result['status']}"
+                    f" ({result.get('duration', 0):.1f}s){gpu_info}"
+                )
+                pbar.update(1)
+
+            pbar.close()
+
+        # Final summary
+        self.print_summary()
+
+        # Aggregate results
+        self.aggregate_all_results()
+
+
 def aggregate_results(result_files: List[Path], output_path: str) -> None:
     """
     Aggregate individual scenario results into a final JSON.
@@ -769,6 +1193,7 @@ def main():
 
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
+                                 "drivor_front",
                                  "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
                         help="Model type")
 
@@ -883,10 +1308,32 @@ def main():
     parser.add_argument('--consensus-temperature', type=float, default=1.0,
                         help="Softmax temperature for consensus trajectory weighting (default: 1.0)")
 
+    # Multi-process / multi-GPU options
+    parser.add_argument('--num-gpus', type=int, default=4,
+                        help="Number of GPUs to use for multi-process evaluation (default: 1). "
+                             "Scenarios are distributed round-robin across GPUs. "
+                             "Ignored if --gpu-ids is provided.")
+
+    parser.add_argument('--gpu-ids', type=str, default=None,
+                        help="Comma-separated list of GPU IDs to use (e.g. '0,2,5'). "
+                             "Overrides --num-gpus. Each worker subprocess gets "
+                             "CUDA_VISIBLE_DEVICES set to the assigned GPU.")
+    
+    parser.add_argument("--chunk-num", type=int, default=1, help="Number of chunks to split the images into")
+    parser.add_argument("--chunk-idx", type=int, default=0, help="Index of the chunk to process")
+
     args = parser.parse_args()
 
-    # Create batch evaluator
-    evaluator = BatchEvaluator(
+    # Parse gpu_ids if provided
+    gpu_ids = None
+    if args.gpu_ids is not None:
+        gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(',')]
+
+    # Determine whether to use multi-process or sequential evaluator
+    use_multiprocess = (args.num_gpus > 1) or (gpu_ids is not None and len(gpu_ids) > 1) or (args.max_workers > 1)
+
+    # Common kwargs for both evaluator types
+    evaluator_kwargs = dict(
         model_type=args.model_type,
         checkpoint_path=args.checkpoint,
         scenario_root=args.scenario_root,
@@ -915,8 +1362,19 @@ def main():
         temporal_lambda=args.temporal_lambda,
         temporal_max_history=args.temporal_max_history,
         temporal_sigma=args.temporal_sigma,
-        consensus_temperature=args.consensus_temperature
+        consensus_temperature=args.consensus_temperature,
     )
+
+    if use_multiprocess:
+        evaluator = MultiProcessBatchEvaluator(
+            **evaluator_kwargs,
+            num_gpus=args.num_gpus,
+            gpu_ids=gpu_ids,
+            chunk_num=args.chunk_num,
+            chunk_idx=args.chunk_idx,
+        )
+    else:
+        evaluator = BatchEvaluator(**evaluator_kwargs)
 
     # Run evaluation
     try:

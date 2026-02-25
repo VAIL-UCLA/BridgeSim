@@ -46,6 +46,9 @@ SCORER_TYPE="--scorer-type navsim"
 SCORE_START_FRAME=""
 EVAL_MODE=""
 ENABLE_VIS=""
+NUM_WORKERS=""
+CHUNK_NUM=""
+CHUNK_IDX=""
 
 # Parse flags (can be in any position)
 RESUME_FLAG=""
@@ -87,6 +90,18 @@ while [[ $# -gt 0 ]]; do
         --enable-vis)
             ENABLE_VIS="--enable-vis"
             shift
+            ;;
+        --num-workers)
+            NUM_WORKERS="--max-workers $2"
+            shift 2
+            ;;
+        --chunk-num)
+            CHUNK_NUM="--chunk-num $2"
+            shift 2
+            ;;
+        --chunk-idx)
+            CHUNK_IDX="--chunk-idx $2"
+            shift 2
             ;;
         *)
             shift
@@ -136,6 +151,7 @@ echo "Output: $OUTPUT_DIR"
 [ -n "$SCORE_START_FRAME" ] && echo "Score Start Frame: $SCORE_START_FRAME"
 [ -n "$EVAL_MODE" ] && echo "Eval Mode: $EVAL_MODE"
 [ -n "$ENABLE_VIS" ] && echo "Visualization: enabled"
+[ -n "$NUM_WORKERS" ] && echo "Max Workers: $NUM_WORKERS"
 echo "============================================================"
 
 # Build command
@@ -147,7 +163,7 @@ CMD="python batch_evaluator.py \
     --traffic-mode \"$TRAFFIC_MODE\" \
     --no-save-perframe \
     --max-workers 1 \
-    $RESUME_FLAG $REPLAN_RATE $SIM_DT $EGO_REPLAY_FRAMES $EVAL_FRAMES $SCORER_TYPE $SCORE_START_FRAME $EVAL_MODE $ENABLE_VIS"
+    $RESUME_FLAG $REPLAN_RATE $SIM_DT $EGO_REPLAY_FRAMES $EVAL_FRAMES $SCORER_TYPE $SCORE_START_FRAME $EVAL_MODE $ENABLE_VIS $NUM_WORKERS $CHUNK_NUM $CHUNK_IDX"
 
 [ -n "$CONFIG_PATH" ] && CMD="$CMD --config \"$CONFIG_PATH\""
 [ -n "$PLAN_ANCHOR_PATH" ] && CMD="$CMD --plan-anchor-path \"$PLAN_ANCHOR_PATH\""

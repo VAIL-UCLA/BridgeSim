@@ -8,6 +8,28 @@ import os
 import sys
 from pathlib import Path
 
+# Initialize CUDA device BEFORE any imports that might use CUDA
+if 'CUDA_VISIBLE_DEVICES' in os.environ:
+    gpu = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[0]
+    try:                                                                                                                                                                                                                                                                                                                               
+        from panda3d.core import loadPrcFileData                                                                                                                                                                                                                                                                                       
+        loadPrcFileData('', f'egl-device-index {gpu}')                                                                                                                                                                                                                                                                             
+        print(f"[Early init] Panda3D EGL device index set to {gpu}")                                                                                                                                                                                                                                                               
+    except Exception:                                                                                                                                                                                                                                                                                                                  
+        pass  
+    try:
+        from cuda import cudart
+        # cudaSetDevice returns a tuple (error_code, )
+        err, = cudart.cudaSetDevice(0)
+        if err == cudart.cudaError_t.cudaSuccess:
+            print("[Early init] CUDA runtime device set to 0")
+        else:
+            print(f"[Early init] Warning: Failed to set CUDA runtime device: {err}")
+    except Exception as e:
+        # Pass silently if cuda-python is not installed or other errors occur
+        # The main code will handle device placement via PyTorch
+        pass
+
 # Add evaluation to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -141,6 +163,17 @@ def create_model_adapter(args):
             num_poses=args.num_poses,
             use_lidar=args.use_lidar
         )
+        
+    elif model_type == "drivor_front":
+        from bridgesim.evaluation.models.drivor_adapter import DrivoRAdapter
+        return DrivoRAdapter(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+            num_cameras=1,
+            image_size=tuple(args.image_size) if args.image_size else (512, 288),
+            num_poses=args.num_poses,
+            use_lidar=args.use_lidar
+        )
 
     elif model_type == "transfuser":
         from bridgesim.evaluation.models.transfuser_adapter import TransfuserAdapter
@@ -207,7 +240,9 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", 
+                 "drivor_front", 
+                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
         help="Model type to evaluate"
     )
     parser.add_argument(
@@ -320,7 +355,7 @@ def main():
         "--num-cameras",
         type=int,
         default=4,
-        choices=[4, 8],
+        choices=[1, 4, 8],
         help="Number of cameras for DrivoR (4 or 8)"
     )
     parser.add_argument(
@@ -507,16 +542,19 @@ def main():
     print(f"Creating {args.model_type.upper()} model adapter...")
     model_adapter = create_model_adapter(args)
 
-    # Construct output directory with model parameters
-    # Format: {output_dir}/{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames}[_ta{temporal_alpha}_th{temporal_max_history}]/
-    eval_frames_str = str(args.eval_frames) if args.eval_frames is not None else "None"
-    output_subdir = f"{args.model_type}_rr{args.replan_rate}_erf{args.ego_replay_frames}_ef{eval_frames_str}"
-    if args.trajectory_scorer:
-        ng = args.num_groups if args.num_groups is not None else (1 if args.model_type == "diffusiondrive" else 10)
-        output_subdir += f"_scorer_{args.trajectory_scorer}_ng{ng}"
-    if args.enable_temporal_consistency:
-        output_subdir += f"_ta{args.temporal_alpha}_th{args.temporal_max_history}"
-    full_output_dir = os.path.join(args.output_dir, output_subdir)
+    if 'rr' in args.output_dir and 'erf' in args.output_dir and 'ef' in args.output_dir:
+        full_output_dir = args.output_dir
+    else:
+        # Construct output directory with model parameters
+        # Format: {output_dir}/{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames}[_ta{temporal_alpha}_th{temporal_max_history}]/
+        eval_frames_str = str(args.eval_frames) if args.eval_frames is not None else "None"
+        output_subdir = f"{args.model_type}_rr{args.replan_rate}_erf{args.ego_replay_frames}_ef{eval_frames_str}"
+        if args.trajectory_scorer:
+            ng = args.num_groups if args.num_groups is not None else (1 if args.model_type == "diffusiondrive" else 10)
+            output_subdir += f"_scorer_{args.trajectory_scorer}_ng{ng}"
+        if args.enable_temporal_consistency:
+            output_subdir += f"_ta{args.temporal_alpha}_th{args.temporal_max_history}"
+        full_output_dir = os.path.join(args.output_dir, output_subdir)
 
     # Create evaluator
     print("Creating evaluator...")
