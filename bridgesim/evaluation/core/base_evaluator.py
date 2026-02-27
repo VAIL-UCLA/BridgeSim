@@ -1496,14 +1496,8 @@ class BaseEvaluator:
                 frames = []
                 for img_path in images:
                     frame = cv2.imread(str(img_path))
-                    if frame is None:
-                        continue
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     frames.append(frame)
-
-                if not frames:
-                    print(f"No readable images found for {filename}")
-                    return
 
                 try:
                     import imageio
@@ -1544,28 +1538,33 @@ class BaseEvaluator:
         )
 
         # 5. Determine if we need to replan
+        # During replay: inference at frame 0 and every replan_rate (for warmup)
+        # After replay: force replan at ego_replay_frames, then every replan_rate from there
+        # e.g., replay=30, replan_rate=20 -> inference at 0, 20, 30, 50, 70...
         if frame_id < self.ego_replay_frames:
+            # During replay: warmup inference follows normal replan_rate from frame 0
             replan_offset = frame_id % self.replan_rate
             needs_replan = (replan_offset == 0)
         elif frame_id == self.ego_replay_frames:
+            # Transition frame: force replan to restart cycle
             replan_offset = 0
             needs_replan = True
         else:
+            # After replay: replan cycle counts from ego_replay_frames
             frames_since_replay_end = frame_id - self.ego_replay_frames
             replan_offset = frames_since_replay_end % self.replan_rate
             needs_replan = (replan_offset == 0)
 
         # 6. Run inference only when it's time to replan
         if needs_replan:
+            # Set simulation time for temporal consistency scoring (if supported)
             current_sim_time = frame_id * self.sim_dt
             if hasattr(self.model_adapter, 'set_simulation_time'):
                 self.model_adapter.set_simulation_time(current_sim_time)
 
             model_output = self.model_adapter.run_inference(model_input)
             parsed_output = self.model_adapter.parse_output(model_output, ego_state)
-            self.cached_parsed_output = parsed_output  # cache parsed output (reasoning, etc.)
-
-            plan_traj_ego = np.asarray(parsed_output['trajectory'])  # ego frame [lateral(left), forward]
+            plan_traj_ego = np.asarray(parsed_output['trajectory'])  # In ego frame
 
             # Interpolate trajectory from model_dt to sim_dt intervals
             model_dt = self.model_adapter.get_waypoint_dt()
@@ -1584,12 +1583,15 @@ class BaseEvaluator:
             self.cached_model_output = model_output
             self.cached_parsed_output = parsed_output
             self.last_replan_frame = frame_id
+            # Store ego pose at prediction time for candidate trajectory visualization
             self.cached_prediction_position = ego_state['position'].copy()
             self.cached_prediction_heading = ego_state['heading']
 
             # Update planning history for replan summary visualization
+            # Update consumed_count for the previous plan (it was consumed up to replan_rate waypoints)
             if len(self.planning_history) > 0:
                 prev_entry = self.planning_history[-1]
+                # The previous plan was consumed for replan_rate waypoints (or until end of trajectory)
                 consumed = min(self.replan_rate, len(prev_entry[1]) if prev_entry[1] is not None else 0)
                 self.planning_history[-1] = (prev_entry[0], prev_entry[1], prev_entry[2], prev_entry[3], consumed, prev_entry[5])
 
@@ -1598,6 +1600,7 @@ class BaseEvaluator:
             if 'trajectory_topk' in parsed_output:
                 topk_ego = np.asarray(parsed_output['trajectory_topk'])  # (K, N, 2) in ego frame
                 if topk_ego is not None and len(topk_ego) > 0:
+                    # Transform each candidate from ego frame to world coordinates
                     topk_world = []
                     for cand in topk_ego:
                         cand_left = cand[:, 0]
@@ -1607,19 +1610,21 @@ class BaseEvaluator:
                         topk_world.append(np.stack((cand_world_x, cand_world_y), axis=1))
                     topk_world = np.array(topk_world)
 
+            # Add new plan to history with consumed_count=0 (will be updated on next replan)
             self.planning_history.append((
                 frame_id,
                 self.cached_plan_traj_world.copy(),
                 ego_state['position'].copy(),
                 ego_state['heading'],
-                0,
-                topk_world
+                0,  # consumed_count, will be updated on next replan
+                topk_world  # top-k candidates in world coordinates
             ))
 
         # 7. Get trajectory subset based on replan offset
         if self.cached_plan_traj_world is None:
             raise RuntimeError(f"Frame {frame_id}: No cached trajectory available. This should not happen.")
 
+        # Check if we have enough waypoints for the current offset
         if replan_offset >= len(self.cached_plan_traj_world):
             raise RuntimeError(
                 f"Frame {frame_id}: Consumed all {len(self.cached_plan_traj_world)} waypoints "
@@ -1628,44 +1633,60 @@ class BaseEvaluator:
                 f"Reduce replan_rate or use model that predicts more waypoints."
             )
 
+        # Get waypoints from offset onwards (sequential consumption)
         world_traj_subset = self.cached_plan_traj_world[replan_offset:]
 
         # 8. Transform waypoints from world to current ego frame
+        # This is critical because the controller expects waypoints in the current ego frame
         delta = world_traj_subset - ego_state['position'][:2]
         cos_h = np.cos(-ego_state['heading'])
         sin_h = np.sin(-ego_state['heading'])
         plan_traj = np.empty_like(delta)
-        plan_traj[:, 0] = sin_h * delta[:, 0] + cos_h * delta[:, 1]  # lateral/left (+)
-        plan_traj[:, 1] = cos_h * delta[:, 0] - sin_h * delta[:, 1]  # forward (+)
+        plan_traj[:, 0] = sin_h * delta[:, 0] + cos_h * delta[:, 1]
+        plan_traj[:, 1] = cos_h * delta[:, 0] - sin_h * delta[:, 1]
 
+        # Original loop for reference:
+        # plan_traj = []
+        # for i in range(len(world_traj_subset)):
+        #     delta = world_traj_subset[i] - ego_state['position'][:2]
+        #     cos_h = np.cos(-ego_state['heading'])
+        #     sin_h = np.sin(-ego_state['heading'])
+        #     ego_x = sin_h * delta[0] + cos_h * delta[1]
+        #     ego_y = cos_h * delta[0] - sin_h * delta[1]
+        #     plan_traj.append([ego_x, ego_y])
+        # plan_traj = np.array(plan_traj)
+
+        # Also compute full world trajectory for compatibility
         world_traj = world_traj_subset
 
         # 9. Control
         next_waypoint = ego_state['waypoint']
         delta_world = next_waypoint - ego_state['position'][:2]
 
+        # Rotate into ego frame (ego heading points forward in ego frame)
         cos_h = np.cos(-ego_state['heading'])
         sin_h = np.sin(-ego_state['heading'])
         target_ego_x = sin_h * delta_world[0] + cos_h * delta_world[1]
         target_ego_y = cos_h * delta_world[0] - sin_h * delta_world[1]
         target_ego = np.array([target_ego_x, target_ego_y])
 
-        plan_traj_subset = plan_traj
+        plan_traj_subset = plan_traj #[:min(6, len(plan_traj))]
 
         steer, throttle, brake, control_metadata = self.controller.control_pid(
             plan_traj_subset,
             ego_state['speed'],
             target_ego,
-            waypoint_dt=self.sim_dt,
+            waypoint_dt=self.sim_dt,  # Trajectory is now interpolated to sim_dt intervals
         )
 
         throttle = float(throttle)
         brake = float(int(brake))
+
+        # MetaDrive expects action as [steer, throttle - brake]
         control = np.array([steer, throttle - brake])
 
-        # 10. Visualization
+        # 10. Render top-down BEV visualization every frame for smooth GIFs
         if self.enable_vis:
-            # Topdown every frame
             self.render_topdown_bev(
                 env, frame_id, ego_state['position'], ego_state['heading'],
                 ego_state['waypoint'], ego_state['command'],
@@ -1681,6 +1702,7 @@ class BaseEvaluator:
                 pred_pos = self.cached_prediction_position
                 pred_heading = self.cached_prediction_heading
 
+                # Render top-32 candidates visualization
                 if 'trajectory_topk' in parsed:
                     topk_scores = parsed.get('topk_scores', None)
                     self.render_topdown_bev_candidates_topk(
@@ -1692,6 +1714,7 @@ class BaseEvaluator:
                         prediction_heading=pred_heading
                     )
 
+                # Render fine-grained 4 candidates visualization
                 if 'trajectory_candidates' in parsed:
                     self.render_topdown_bev_candidates_finegrained(
                         env, frame_id, ego_state['position'], ego_state['heading'],
@@ -1731,7 +1754,7 @@ class BaseEvaluator:
                             prediction_heading=pred_heading
                         )
 
-        # 12. Visualize model outputs only when model runs
+        # 12. Visualize model outputs (seg, occ, bev_embed) only when model runs
         if self.enable_vis and replan_offset == 0:
             frame_output_path = self.output_dir / f"{frame_id:05d}"
             seg_output_path = frame_output_path / "seg_output.pth"
@@ -1746,50 +1769,6 @@ class BaseEvaluator:
                 self.visualize_bev_embed(frame_id, bev_embed_path)
 
         return control, ego_state, plan_traj, world_traj
-
-    def _put_multiline(self, img, lines, x=20, y=35, line_h=26):
-        """
-        Draw multiple lines of text with a semi-transparent background box.
-        img: BGR uint8 image (OpenCV)
-        lines: list[str]
-        """
-        if img is None:
-            return
-        if not lines:
-            return
-
-        # Ensure strings
-        lines = [str(ln) for ln in lines]
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.6
-        thickness = 2
-
-        # Measure box size
-        widths = []
-        for ln in lines:
-            (w, h), _ = cv2.getTextSize(ln, font, scale, thickness)
-            widths.append(w)
-
-        box_w = (max(widths) + 20) if widths else 200
-        box_h = len(lines) * line_h + 20
-
-        # Semi-transparent background box
-        overlay = img.copy()
-        cv2.rectangle(
-            overlay,
-            (x - 10, y - 25),
-            (x - 10 + box_w, y - 25 + box_h),
-            (0, 0, 0),
-            -1
-        )
-        cv2.addWeighted(overlay, 0.45, img, 0.55, 0, img)
-
-        # Draw lines
-        yy = y
-        for ln in lines:
-            cv2.putText(img, ln, (x, yy), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-            yy += line_h
 
     def run(self):
         """Run the complete evaluation."""
