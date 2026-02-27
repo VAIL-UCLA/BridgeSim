@@ -462,14 +462,6 @@ def main():
              "Total frames = min(ego_replay_frames + eval_frames, scenario_length)"
     )
     parser.add_argument(
-        "--scorer-type",
-        type=str,
-        default="legacy",
-        choices=["legacy", "navsim"],
-        help="Scorer type for closed_loop mode (default: legacy). "
-             "'navsim' uses NavSim-style EPDMS scoring with per-frame metrics."
-    )
-    parser.add_argument(
         "--eval-metrics",
         type=str,
         default="pdms",
@@ -542,7 +534,6 @@ def main():
         sim_dt=args.sim_dt,
         ego_replay_frames=args.ego_replay_frames,
         eval_frames=args.eval_frames,
-        scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
         eval_metrics=args.eval_metrics,
     )

@@ -57,7 +57,6 @@ class BaseEvaluator:
                  sim_dt: float = 0.1,
                  ego_replay_frames: int = 0,
                  eval_frames: int = None,
-                 scorer_type: str = "legacy",
                  score_start_frame: int = None,
                  eval_metrics: str = "pdms",
                  ):
@@ -77,7 +76,6 @@ class BaseEvaluator:
             sim_dt: Simulation timestep in seconds (default: 0.1s for 10Hz)
             ego_replay_frames: Number of initial frames to replay ego log actions (inference still runs)
             eval_frames: Number of frames to evaluate after ego replay (None = full scenario)
-            scorer_type: Scorer type for closed_loop ('legacy' or 'navsim')
             score_start_frame: Frame to start calculating scores (None = use ego_replay_frames)
             eval_metrics: Scoring metric set to use ('pdms' or 'epdms'). Default: 'pdms'
         """
@@ -96,7 +94,6 @@ class BaseEvaluator:
         self.replan_rate = replan_rate
         self.ego_replay_frames = max(0, ego_replay_frames)
         self.eval_frames = eval_frames
-        self.scorer_type = scorer_type
         self.eval_metrics = eval_metrics
         # Score start frame: defaults to ego_replay_frames if not specified
         self.score_start_frame = score_start_frame if score_start_frame is not None else self.ego_replay_frames
@@ -152,7 +149,7 @@ class BaseEvaluator:
             print(f"  Eval frames (after replay): {self.eval_frames}")
         print(f"  Score start frame: {self.score_start_frame}")
         if self.eval_mode == "closed_loop":
-            print(f"  Scorer type: {self.scorer_type}")
+            print(f"  Eval metrics: {self.eval_metrics}")
 
     def prepare_ego_replay_actions(self):
         """
