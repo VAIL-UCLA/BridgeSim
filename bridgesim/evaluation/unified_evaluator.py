@@ -470,6 +470,15 @@ def main():
              "'navsim' uses NavSim-style EPDMS scoring with per-frame metrics."
     )
     parser.add_argument(
+        "--eval-metrics",
+        type=str,
+        default="pdms",
+        choices=["pdms", "epdms"],
+        help="Scoring metric set to use (default: pdms). "
+             "'pdms' excludes Extended Comfort (EC). "
+             "'epdms' includes all metrics including EC."
+    )
+    parser.add_argument(
         "--score-start-frame",
         type=int,
         default=None,
@@ -535,6 +544,7 @@ def main():
         eval_frames=args.eval_frames,
         scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
+        eval_metrics=args.eval_metrics,
     )
 
     # Run evaluation
