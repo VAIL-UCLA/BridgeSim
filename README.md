@@ -218,6 +218,7 @@ outputs/
 | `rap` | `bridgesim/evaluation/models/rap_adapter.py` |
 | `lead_navsim` | `bridgesim/evaluation/models/lead_navsim_adapter.py` |
 | `ego_mlp` | `bridgesim/evaluation/models/ego_mlp_adapter.py` |
+| `alpamayo_r1` | `bridgesim/evaluation/models/alpamayo_r1_adapter.py` |
 
 ---
 
