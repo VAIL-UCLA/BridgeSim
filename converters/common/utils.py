@@ -293,11 +293,49 @@ def write_to_directory(
     with multiprocessing.Pool(num_workers, maxtasksperchild=10) as p:
         ret = list(p.imap(func, argument_list))
         # call ret to block the process
-    merge_database(save_path, *output_pathes, exist_ok=True, overwrite=False, try_generate_missing_file=False)
+    summary, mapping = merge_database(
+        save_path, *output_pathes, exist_ok=True, overwrite=False, try_generate_missing_file=False, save=False
+    )
+    for worker_path in output_pathes:
+        if not os.path.exists(worker_path):
+            continue
+        for folder_name in os.listdir(worker_path):
+            folder_path = os.path.join(worker_path, folder_name)
+            if not (folder_name.startswith("sd_") and os.path.isdir(folder_path)):
+                continue
+            target_path = os.path.join(save_path, folder_name)
+            if os.path.exists(target_path):
+                raise FileExistsError("Per-scenario folder already exists: {}".format(target_path))
+            shutil.move(folder_path, target_path)
+
+    basename_prefix = "{}_".format(os.path.basename(output_path))
+    remapped = {}
+    for scenario_file, rel_path in mapping.items():
+        parts = rel_path.split(os.sep)
+        if parts and parts[0].startswith(basename_prefix):
+            remapped[scenario_file] = os.path.join(*parts[1:]) if len(parts) > 1 else ""
+        else:
+            remapped[scenario_file] = rel_path
+
+    save_summary_and_mapping(
+        os.path.join(save_path, SD.DATASET.SUMMARY_FILE),
+        os.path.join(save_path, SD.DATASET.MAPPING_FILE),
+        summary,
+        remapped
+    )
+
+    for worker_path in output_pathes:
+        if os.path.exists(worker_path):
+            shutil.rmtree(worker_path)
 
 
 def writing_to_directory_wrapper(
-    args, convert_func, dataset_version, dataset_name, overwrite=False, preprocess=single_worker_preprocess
+    args,
+    convert_func,
+    dataset_version,
+    dataset_name,
+    overwrite=False,
+    preprocess=single_worker_preprocess
 ):
     """Wrapper function for multiprocessing."""
     return write_to_directory_single_worker(
@@ -367,7 +405,14 @@ def write_to_directory_single_worker(
         # convert scenario
         sd_scenario = convert_func(scenario, dataset_version, **kwargs)
         scenario_id = sd_scenario[SD.ID]
-        export_file_name = SD.get_export_file_name(dataset_name, dataset_version, scenario_id)
+        export_file_name = "sd_{}.pkl".format(scenario_id)
+        scenario_folder = "sd_{}".format(scenario_id)
+        scenario_shard = "{}_0".format(scenario_folder)
+        scenario_dir = os.path.join(output_path, scenario_folder, scenario_shard)
+        if os.path.exists(os.path.join(output_path, scenario_folder)):
+            shutil.rmtree(os.path.join(output_path, scenario_folder))
+        os.makedirs(scenario_dir, exist_ok=False)
+        mapping_rel_path = os.path.join(scenario_folder, scenario_shard)
 
         if hasattr(SD, "update_summaries"):
             SD.update_summaries(sd_scenario)
@@ -378,16 +423,25 @@ def write_to_directory_single_worker(
         if export_file_name in summary:
             logger.warning("Scenario {} already exists and will be overwritten!".format(export_file_name))
         summary[export_file_name] = copy.deepcopy(sd_scenario[SD.METADATA])
-        mapping[export_file_name] = ""  # in the same dir
+        mapping[export_file_name] = mapping_rel_path
 
         # sanity check
         sd_scenario = sd_scenario.to_dict()
         SD.sanity_check(sd_scenario, check_self_type=True)
 
         # dump
-        p = os.path.join(output_path, export_file_name)
+        p = os.path.join(scenario_dir, export_file_name)
         with open(p, "wb") as f:
             pickle.dump(sd_scenario, f)
+
+        per_summary = {export_file_name: copy.deepcopy(sd_scenario[SD.METADATA])}
+        per_mapping = {export_file_name: scenario_shard}
+        save_summary_and_mapping(
+            os.path.join(output_path, scenario_folder, SD.DATASET.SUMMARY_FILE),
+            os.path.join(output_path, scenario_folder, SD.DATASET.MAPPING_FILE),
+            per_summary,
+            per_mapping
+        )
 
         if report_memory_freq is not None and (count) % report_memory_freq == 0:
             print("Current Memory: {}".format(process_memory()))

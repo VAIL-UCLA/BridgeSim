@@ -21,7 +21,7 @@ cd "$REPO_ROOT/bridgesim/evaluation"
 MODEL_TYPE="${1:-uniad}"
 SCENARIO_ROOT="${2:-}"
 OUTPUT_BASE="${REPO_ROOT}/outputs/batch_eval"
-TRAFFIC_MODE="log_replay"
+TRAFFIC_MODE="log_replay"  # Options: no_traffic, log_replay, IDM
 
 # Check if scenario root is provided
 if [ -z "$SCENARIO_ROOT" ]; then

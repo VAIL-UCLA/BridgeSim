@@ -14,7 +14,7 @@ from pathlib import Path
 
 # Base paths (relative to this file's directory)
 _THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parent.parent.parent.parent  # bridgesim/evaluation/models -> repo root
+_REPO_ROOT = _THIS_DIR.parent.parent.parent  # bridgesim/evaluation/models -> repo root
 CKPT_BASE = str((_REPO_ROOT / "ckpts/BridgeSim").resolve())
 _MODELZOO_BENCH2DRIVE = _THIS_DIR.parent.parent / "modelzoo" / "bench2drive"
 

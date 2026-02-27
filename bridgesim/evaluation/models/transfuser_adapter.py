@@ -16,6 +16,7 @@ from bridgesim.modelzoo.navsim.agents.transfuser.transfuser_config import Transf
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 
 
 class TransfuserAdapter(BaseModelAdapter):
@@ -25,16 +26,18 @@ class TransfuserAdapter(BaseModelAdapter):
     TransFuser uses multi-camera images and LiDAR for BEV representation.
     """
 
-    def __init__(self, checkpoint_path: str, **kwargs):
+    def __init__(self, checkpoint_path: str, bev_calibrator=None, **kwargs):
         """
         Initialize TransFuser adapter.
 
         Args:
             checkpoint_path: Path to checkpoint (.ckpt file)
+            bev_calibrator: Optional TransfuserBEVCalibrator for domain adaptation.
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.config = None
         self.trajectory_sampling = None
+        self.bev_calibrator = bev_calibrator
 
     def load_model(self):
         """Load TransFuser model from checkpoint."""
@@ -62,15 +65,17 @@ class TransfuserAdapter(BaseModelAdapter):
         self.model.to(self.device)
         self.model.eval()
 
+        # Attach BEV calibrator if provided
+        if self.bev_calibrator is not None:
+            print("Loading BEV calibrator for TransFuser...")
+            self.bev_calibrator.load_model()
+            self.model.bev_calibrator = self.bev_calibrator
+
         print("TransFuser model loaded successfully.")
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """TransFuser uses 3 cameras (left, front, right) stitched together."""
-        return {
-            'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-        }
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
@@ -180,8 +185,9 @@ class TransfuserAdapter(BaseModelAdapter):
 
     def run_inference(self, model_input: Any) -> Any:
         """Run TransFuser model inference."""
+        use_bev_calibrator = self.bev_calibrator is not None
         with torch.no_grad():
-            output = self.model(model_input)
+            output = self.model(model_input, use_bev_calibrator=use_bev_calibrator)
         return output
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:

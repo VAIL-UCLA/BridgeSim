@@ -11,18 +11,19 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Tuple
-
-import numpy as np
 from collections import deque
 
+import numpy as np
+
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+
 
 def _bridgesim_repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
 def _default_alpamayo_root() -> Path:
-    return _bridgesim_repo_root().parent / "alpamayo"
+    return _bridgesim_repo_root() / "bridgesim" / "modelzoo" / "nvidia" / "alpamayo"
 
 
 def _default_alpamayo_python() -> str:
@@ -35,11 +36,13 @@ def _default_alpamayo_python() -> str:
 def _default_alpamayo_script() -> str:
     return os.environ.get(
         "ALPAMAYO_SCRIPT",
-        str(_bridgesim_repo_root() / "tools" / "bridgesim_infer_once.py"),
+        str(_bridgesim_repo_root() / "bridgesim" / "modelzoo" / "nvidia" / "tools" / "alpamayo_bridgesim_infer.py"),
     )
+
+
 @dataclass
 class AlpamayoR1AdapterConfig:
-    # Alpamayo-style 4-camera setup (cam-major, 4 frames each -> 16 frames total)
+    # 4-camera setup (cam-major, 4 frames each -> 16 frames total)
     camera_names: Tuple[str, ...] = (
         "CAM_CROSS_LEFT",
         "CAM_FRONT_WIDE",
@@ -58,11 +61,7 @@ class AlpamayoR1AdapterConfig:
     temperature: float = 0.6
     num_traj_samples: int = 1
     max_generation_length: int = 256
-
-    # Coordinate convention (sweepable; see tools/bridgesim_infer_once.py)
     coord_mode: str = "x_forward_y_left"
-
-    # Buffers
     max_history: int = 20  # ego history length (world frame)
 
     # Trajectory metadata
@@ -71,6 +70,7 @@ class AlpamayoR1AdapterConfig:
 
     # Debug
     cuda_launch_blocking: bool = False
+
 
 class AlpamayoSubprocessClient:
     """
@@ -118,9 +118,12 @@ class AlpamayoSubprocessClient:
 
             cmd = [
                 "env",
-                "-u", "PYTHONUTF8",
-                "-u", "PYTHONHOME",
-                "-u", "PYTHONPATH",
+                "-u",
+                "PYTHONUTF8",
+                "-u",
+                "PYTHONHOME",
+                "-u",
+                "PYTHONPATH",
             ]
 
             if cuda_launch_blocking:
@@ -129,17 +132,28 @@ class AlpamayoSubprocessClient:
             cmd += [
                 str(self.alp_python),
                 str(self.alp_script),
-                "--model", str(self.model_name),
-                "--image-npy", str(img_npy),
-                "--ego-xyz-npy", str(ego_xyz_npy),
-                "--ego-rot-npy", str(ego_rot_npy),
-                "--out-json", str(out_json),
-                "--top-p", str(top_p),
-                "--temperature", str(temperature),
-                "--num-traj-samples", str(num_traj_samples),
-                "--max-generation-length", str(max_generation_length),
-                "--nav-cmd", str(nav_cmd),
-                "--coord-mode", str(coord_mode),
+                "--model",
+                str(self.model_name),
+                "--image-npy",
+                str(img_npy),
+                "--ego-xyz-npy",
+                str(ego_xyz_npy),
+                "--ego-rot-npy",
+                str(ego_rot_npy),
+                "--out-json",
+                str(out_json),
+                "--top-p",
+                str(top_p),
+                "--temperature",
+                str(temperature),
+                "--num-traj-samples",
+                str(num_traj_samples),
+                "--max-generation-length",
+                str(max_generation_length),
+                "--nav-cmd",
+                str(nav_cmd),
+                "--coord-mode",
+                str(coord_mode),
             ]
 
             proc = subprocess.run(
@@ -166,6 +180,7 @@ class AlpamayoSubprocessClient:
                 )
 
             return json.loads(out_json.read_text())
+
 
 class AlpamayoR1Adapter(BaseModelAdapter):
     """
@@ -209,14 +224,89 @@ class AlpamayoR1Adapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """
-        Request a 4-camera setup. (Approximate params; tune if needed.)
+        Request a 4-camera setup + a CAM_F0 alias (for visualization only).
         """
-        return {
-            "CAM_FRONT_WIDE":  {"x": 0.80, "y": 0.0,  "z": 1.60, "yaw": 0.0,   "pitch": 0.0, "roll": 0.0, "fov": 120, "width": 1920, "height": 1080},
-            "CAM_FRONT_TELE":  {"x": 0.80, "y": 0.0,  "z": 1.60, "yaw": 0.0,   "pitch": 0.0, "roll": 0.0, "fov": 30,  "width": 1920, "height": 1080},
-            "CAM_CROSS_LEFT":  {"x": 0.40, "y": -0.55,"z": 1.60, "yaw": -90.0, "pitch": 0.0, "roll": 0.0, "fov": 120, "width": 1920, "height": 1080},
-            "CAM_CROSS_RIGHT": {"x": 0.40, "y": 0.55, "z": 1.60, "yaw": 90.0,  "pitch": 0.0, "roll": 0.0, "fov": 120, "width": 1920, "height": 1080},
+        cfg: Dict[str, Dict[str, float]] = {
+            "CAM_FRONT_WIDE": {
+                "x": 0.80,
+                "y": 0.0,
+                "z": 1.60,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "fov": 120,
+                "width": 1920,
+                "height": 1080,
+            },
+            "CAM_FRONT_TELE": {
+                "x": 0.80,
+                "y": 0.0,
+                "z": 1.60,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "fov": 30,
+                "width": 1920,
+                "height": 1080,
+            },
+            "CAM_CROSS_LEFT": {
+                "x": 0.40,
+                "y": -0.55,
+                "z": 1.60,
+                "yaw": -90.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "fov": 120,
+                "width": 1920,
+                "height": 1080,
+            },
+            "CAM_CROSS_RIGHT": {
+                "x": 0.40,
+                "y": 0.55,
+                "z": 1.60,
+                "yaw": 90.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "fov": 120,
+                "width": 1920,
+                "height": 1080,
+            },
         }
+
+        # Alias: projection math in render_cam_f0_vis uses this
+        cfg["CAM_F0"] = cfg["CAM_FRONT_WIDE"]
+        return cfg
+
+    def perceive(self, env, frame_id) -> Dict[str, np.ndarray]:
+        """
+        Capture only the 4 real Alpamayo cameras, and add CAM_F0 as an alias
+        to CAM_FRONT_WIDE in the returned dict.
+        """
+        sensor = env.engine.get_sensor("rgb_camera")
+        cam_cfgs_all = self.get_camera_configs()
+
+        # Capture only real cams (exclude alias to prevent double-render)
+        cam_cfgs_capture = {k: v for k, v in cam_cfgs_all.items() if k != "CAM_F0"}
+
+        imgs: Dict[str, np.ndarray] = {}
+        for name, cam_cfg in cam_cfgs_capture.items():
+            sensor.lens.setFov(cam_cfg["fov"])
+
+            sensor_output = sensor.perceive(
+                to_float=False,
+                new_parent_node=env.agent.origin,
+                position=(cam_cfg["y"], cam_cfg["x"], cam_cfg["z"]),
+                hpr=(-cam_cfg["yaw"], cam_cfg["pitch"], -cam_cfg["roll"]),
+            )
+
+            sensor_data = sensor_output.get() if hasattr(sensor_output, "get") else sensor_output
+            imgs[name] = sensor_data
+
+        # Add CAM_F0 alias (no extra rendering)
+        if "CAM_FRONT_WIDE" in imgs:
+            imgs["CAM_F0"] = imgs["CAM_FRONT_WIDE"]  # or imgs["CAM_FRONT_WIDE"].copy() if needed for isolation
+
+        return imgs
 
     def load_model(self):
         """
@@ -243,7 +333,7 @@ class AlpamayoR1Adapter(BaseModelAdapter):
         self.client = AlpamayoSubprocessClient(
             alp_python=self.cfg.alp_python,
             alp_script=self.cfg.alp_script,
-            model_name=self.checkpoint_path,   # HF repo id
+            model_name=self.checkpoint_path,  # HF repo id
         )
         print("Alpamayo-R1 adapter ready (model loads inside subprocess on first call).")
 
@@ -252,7 +342,7 @@ class AlpamayoR1Adapter(BaseModelAdapter):
         images: Dict[str, np.ndarray],
         ego_state: Dict[str, Any],
         scenario_data: Dict[str, Any],
-        frame_id: int
+        frame_id: int,
     ) -> Any:
         # Reset buffers at episode start
         if frame_id == 0:
@@ -261,7 +351,7 @@ class AlpamayoR1Adapter(BaseModelAdapter):
             self._ego_pos_hist.clear()
             self._ego_yaw_hist.clear()
 
-        # Push newest frame into each camera deque
+        # Push newest frame into each camera deque (only the 4 Alpamayo cams)
         for cam in self.cfg.camera_names:
             img = images.get(cam, None)
             if img is None:
@@ -276,7 +366,7 @@ class AlpamayoR1Adapter(BaseModelAdapter):
 
             self._img_hist_by_cam[cam].append(img)
 
-        # Flatten cam-major with left-padding per cam
+        # Flatten cam-major with left-padding per cam (4 cams × 4 frames = 16)
         frames_flat: list[np.ndarray] = []
         for cam in self.cfg.camera_names:
             dq = self._img_hist_by_cam[cam]
@@ -288,12 +378,12 @@ class AlpamayoR1Adapter(BaseModelAdapter):
                 if len(frames) < self.cfg.frames_per_camera:
                     frames = [frames[0]] * (self.cfg.frames_per_camera - len(frames)) + frames
                 else:
-                    frames = frames[-self.cfg.frames_per_camera:]
+                    frames = frames[-self.cfg.frames_per_camera :]
             frames_flat.extend(frames)
 
-        img_stack = np.stack(frames_flat, axis=0)  # (16,H,W,3)
+        img_stack = np.stack(frames_flat, axis=0)  # (16, H, W, 3)
 
-        # Ego history
+        # Ego history (world frame)
         pos = np.array(ego_state["position"], dtype=np.float32)
         yaw = float(ego_state["heading"])
         self._ego_pos_hist.append(pos)
@@ -308,7 +398,6 @@ class AlpamayoR1Adapter(BaseModelAdapter):
         for i, y in enumerate(self._ego_yaw_hist):
             ego_hist_yaw[0, 0, i, 0] = y
 
-        # Nav command (prefer scenario_data route commands if present)
         nav_cmd = None
         for key in ("route_commands", "route_cmds", "nav_cmds", "commands"):
             if isinstance(scenario_data.get(key, None), (list, tuple)) and frame_id < len(scenario_data[key]):

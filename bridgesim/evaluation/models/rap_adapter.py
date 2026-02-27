@@ -1,6 +1,6 @@
 """
 Model adapter for RAP (Rasterized Autonomous Planner).
-Supports both rasterized and MetaDrive camera modes.
+Supports rasterized_3d, and MetaDrive camera modes.
 """
 
 import os
@@ -25,11 +25,11 @@ if not hasattr(torch.utils._pytree, "register_pytree_node"):
 from bridgesim.modelzoo.navsim.agents.rap_dino.rap_model import RAPModel
 from bridgesim.modelzoo.navsim.agents.rap_dino.navsim_config import RAPConfig
 
-# Import camera params from converters
+# Import camera params and renderer from converters
 metabench_root = Path(__file__).resolve().parent.parent.parent.parent
 converters_bench2drive_path = metabench_root / "converters" / "bench2drive"
 sys.path.insert(0, str(converters_bench2drive_path))
-from renderer import camera_params, convert_camera_params_to_simple_format
+from renderer import camera_params, convert_camera_params_to_simple_format, ScenarioRenderer
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
@@ -51,9 +51,11 @@ class RAPAdapter(BaseModelAdapter):
     """
     Adapter for RAP model.
 
-    RAP supports two image sources:
-    - 'rasterized': Uses pre-rendered BEV images
+    RAP supports three image sources:
+    - 'rasterized': Uses pre-rendered BEV images (placeholder, no live cameras)
     - 'metadrive': Uses MetaDrive camera sensors (4 cameras)
+    - 'rasterized_3d': Uses ScenarioRenderer to render nuPlan-style camera views
+                       from the live MetaDrive environment state
     """
 
     def __init__(self, checkpoint_path: str, image_source: str = "metadrive", **kwargs):
@@ -62,13 +64,14 @@ class RAPAdapter(BaseModelAdapter):
 
         Args:
             checkpoint_path: Path to checkpoint (.ckpt file)
-            image_source: 'rasterized' or 'metadrive'
+            image_source: 'rasterized', 'metadrive', or 'rasterized_3d'
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.image_source = image_source
         self.config = None
         self.lidar2img_tensor = None
         self.img_shape_tensor = None
+        self.renderer = None
 
     def load_model(self):
         """Load RAP model."""
@@ -99,6 +102,11 @@ class RAPAdapter(BaseModelAdapter):
 
         # Precompute calibration features
         self._setup_calibration_features()
+
+        # Initialize ScenarioRenderer for rasterized_3d mode
+        if self.image_source == "rasterized_3d":
+            self.renderer = ScenarioRenderer(camera_channel_list=CAM_ORDER)
+            print("ScenarioRenderer initialized for rasterized_3d mode.")
 
         print("RAP model loaded successfully.")
 
@@ -152,8 +160,83 @@ class RAPAdapter(BaseModelAdapter):
             )
             return cam_configs
         else:
-            # Rasterized mode doesn't use real cameras
+            # rasterized and rasterized_3d modes handle perception themselves
             return {}
+
+    def perceive(self, env, frame_id: int):
+        """
+        Custom perception for rasterized_3d mode: builds a scenario dict from
+        the live MetaDrive env state and renders camera views via ScenarioRenderer.
+        Returns None for other modes so the base evaluator handles perception.
+        """
+        if self.image_source != "rasterized_3d":
+            return None
+
+        scenario = self._build_raster_scenario_dict(env, frame_id)
+        imgs = self.renderer.observe(scenario)
+        return imgs
+
+    def _build_raster_scenario_dict(self, env, frame_id: int) -> Dict[str, Any]:
+        """
+        Build the scenario dict required by ScenarioRenderer from the current
+        MetaDrive environment state (mirrors _build_raster_scenario_dict in the
+        reference offline evaluator script).
+        """
+        # Import here to avoid hard dependency when mode is not rasterized_3d
+        from metadrive.type import MetaDriveType
+
+        ego_vehicle = env.agent
+        scenario = {
+            'ego_pos_3d': np.array(ego_vehicle.get_state()["position"]),
+            'ego_heading': ego_vehicle.heading_theta,
+            'map_features': env.engine.data_manager.current_scenario["map_features"],
+            'traffic_lights': []
+        }
+
+        # Traffic light states
+        dynamic_map = env.engine.data_manager.current_scenario.get("dynamic_map_states", {})
+        for lane_id, tl_data in dynamic_map.items():
+            if "state" in tl_data and frame_id < len(tl_data["state"]["object_state"]):
+                state_str = tl_data["state"]["object_state"][frame_id]
+                is_red = (state_str == "LANE_STATE_STOP")
+                pos_xy = tl_data["stop_point"][:2]
+                scenario['traffic_lights'].append((lane_id, is_red, pos_xy))
+
+        # Dynamic objects (vehicles, pedestrians, cyclists)
+        gt_boxes_world = []
+        gt_names = []
+        objects = env.engine.get_objects(filter=lambda o: o.name != ego_vehicle.name)
+        for obj in objects.values():
+            if obj.metadrive_type == MetaDriveType.TRAFFIC_LIGHT:
+                continue
+            obj_state = obj.get_state()
+            box_data = [
+                obj_state["position"][0], obj_state["position"][1], obj_state["position"][2],
+                obj.LENGTH, obj.WIDTH, obj.HEIGHT,
+                obj.heading_theta
+            ]
+            gt_boxes_world.append(box_data)
+            if obj.metadrive_type == MetaDriveType.VEHICLE:
+                gt_names.append("vehicle")
+            elif obj.metadrive_type == MetaDriveType.PEDESTRIAN:
+                gt_names.append("pedestrian")
+            elif obj.metadrive_type == MetaDriveType.CYCLIST:
+                gt_names.append("bicycle")
+            else:
+                gt_names.append("vehicle")
+
+        if gt_boxes_world:
+            scenario['anns'] = {
+                'gt_boxes_world': np.array(gt_boxes_world, dtype=np.float32),
+                'gt_names': np.array(gt_names)
+            }
+        else:
+            scenario['anns'] = {
+                'gt_boxes_world': np.empty((0, 7), dtype=np.float32),
+                'gt_names': np.empty((0,), dtype=str)
+            }
+
+        return scenario
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """

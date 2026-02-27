@@ -17,6 +17,7 @@ from bridgesim.modelzoo.navsim.agents.diffusiondrivev2.diffusiondrivev2_sel_conf
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
+from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 
 
 # Image Normalization Constants (RGB)
@@ -43,6 +44,8 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         temporal_max_history: int = 8,
         temporal_sigma: float = 5.0,
         consensus_temperature: float = 1.0,
+        scorer=None,
+        num_groups: int = 10,
         **kwargs
     ):
         """
@@ -60,11 +63,18 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
             consensus_temperature: Softmax temperature for consensus trajectory weighting.
                 Lower values make consensus dominated by highest-PDM trajectory.
                 Higher values make consensus closer to uniform mean. (default: 1.0)
+            scorer: Optional BaseTrajectoryScorer instance for candidate selection.
+                    When set, uses forward_inference_scaling instead of regular forward.
+            num_groups: Number of groups for trajectory candidate generation.
+                        Total candidates = num_groups * 20. Only used when scorer is set.
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.config = None
         self.plan_anchor_path = plan_anchor_path
         self.bev_calibrator = bev_calibrator
+        self.scorer = scorer
+        self.num_groups = num_groups
+        self._current_frame_id = 0
 
         # Temporal consistency parameters
         self.enable_temporal_consistency = enable_temporal_consistency
@@ -128,11 +138,7 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """DiffusionDriveV2 uses 3 cameras (left, front, right) stitched together."""
-        return {
-            'CAM_F0': {'x': 1.3, 'y': 0.0, 'z': 2.3, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_L0': {'x': 1.3, 'y': -0.5, 'z': 2.3, 'yaw': -55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-            'CAM_R0': {'x': 1.3, 'y': 0.5, 'z': 2.3, 'yaw': 55.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1920, 'height': 1080},
-        }
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
@@ -224,6 +230,8 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
                      scenario_data: Dict[str, Any],
                      frame_id: int) -> Any:
         """Prepare input for DiffusionDriveV2 model."""
+        self._current_frame_id = frame_id
+
         # 1. Preprocess images
         camera_feature = self._preprocess_images(images).unsqueeze(0).to(self.device)
 
@@ -246,7 +254,13 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         """Run DiffusionDriveV2 model inference."""
         use_bev_calibrator = self.bev_calibrator is not None
         with torch.no_grad():
-            if self.enable_temporal_consistency:
+            if self.scorer is not None:
+                output = self.model.forward_inference_scaling(
+                    model_input,
+                    num_groups=self.num_groups,
+                    use_bev_calibrator=use_bev_calibrator,
+                )
+            elif self.enable_temporal_consistency:
                 output = self.model.forward_temporal(
                     model_input,
                     current_time=self.current_sim_time,
@@ -277,6 +291,21 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Parse DiffusionDriveV2 output."""
+        if self.scorer is not None:
+            # Use scorer to select best trajectory from candidates
+            scorer_result = self.scorer.select_best(
+                model_output,
+                ego_state=ego_state,
+                frame_idx=self._current_frame_id,
+            )
+            trajectory = scorer_result["trajectory"][0].cpu().numpy()  # (T, 3)
+            traj_swapped = np.column_stack([trajectory[:, 1], trajectory[:, 0]])
+            return {
+                'trajectory': traj_swapped,
+                'best_idx': scorer_result["best_idx"][0].item(),
+                'num_candidates': model_output["all_candidates"].shape[1],
+            }
+
         result = {}
 
         # Extract best trajectory from output

@@ -120,6 +120,14 @@ class BaseModelAdapter(ABC):
         """
         return 4.0  # Default for most models (TransFuser, DiffusionDrive, etc.)
 
+    def perceive(self, env, frame_id: int):
+        """
+        Optional custom perception hook. Return a dict of camera images if the
+        adapter wants to drive image capture itself (e.g. rasterized_3d mode),
+        or return None to let the base evaluator handle perception normally.
+        """
+        return None
+
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """
         Return camera configuration for this model.

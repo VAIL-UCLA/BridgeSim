@@ -1,0 +1,3 @@
+[submodule "bridgesim/modelzoo/nvidia/alpamayo"]
+	path = bridgesim/modelzoo/nvidia/alpamayo
+	url = https://github.com/NVlabs/alpamayo

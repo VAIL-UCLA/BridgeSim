@@ -23,6 +23,7 @@ from metadrive.scenario.parse_object_state import parse_object_state
 
 from bridgesim.evaluation.utils import PIDController, PurePursuitController, OfflineStatisticsManager
 from bridgesim.evaluation.utils.epdms_scorer_md import EPDMSScorer
+from bridgesim.evaluation.utils.pdms_scorer_md import PDMSScorer
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
 from bridgesim.evaluation.utils.constants import VOID, LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
@@ -56,8 +57,8 @@ class BaseEvaluator:
                  sim_dt: float = 0.1,
                  ego_replay_frames: int = 0,
                  eval_frames: int = None,
-                 scorer_type: str = "legacy",
                  score_start_frame: int = None,
+                 eval_metrics: str = "pdms",
                  ):
         """
         Initialize evaluator.
@@ -75,8 +76,8 @@ class BaseEvaluator:
             sim_dt: Simulation timestep in seconds (default: 0.1s for 10Hz)
             ego_replay_frames: Number of initial frames to replay ego log actions (inference still runs)
             eval_frames: Number of frames to evaluate after ego replay (None = full scenario)
-            scorer_type: Scorer type for closed_loop ('legacy' or 'navsim')
             score_start_frame: Frame to start calculating scores (None = use ego_replay_frames)
+            eval_metrics: Scoring metric set to use ('pdms' or 'epdms'). Default: 'pdms'
         """
         self.model_adapter = model_adapter
         self.sim_dt = sim_dt
@@ -93,7 +94,7 @@ class BaseEvaluator:
         self.replan_rate = replan_rate
         self.ego_replay_frames = max(0, ego_replay_frames)
         self.eval_frames = eval_frames
-        self.scorer_type = scorer_type
+        self.eval_metrics = eval_metrics
         # Score start frame: defaults to ego_replay_frames if not specified
         self.score_start_frame = score_start_frame if score_start_frame is not None else self.ego_replay_frames
 
@@ -124,6 +125,7 @@ class BaseEvaluator:
         # Replan caching (for replan_rate > 1)
         self.cached_plan_traj_world = None  # Cached trajectory in world coordinates
         self.cached_model_output = None  # Cached model output for visualization
+        self.cached_parsed_output = None  # Cached parsed output for visualization (avoids re-running scorer)
         self.last_replan_frame = -1  # Track when last replan happened
         self.cached_prediction_position = None  # Ego position at prediction time (for candidate visualization)
         self.cached_prediction_heading = None  # Ego heading at prediction time (for candidate visualization)
@@ -147,7 +149,7 @@ class BaseEvaluator:
             print(f"  Eval frames (after replay): {self.eval_frames}")
         print(f"  Score start frame: {self.score_start_frame}")
         if self.eval_mode == "closed_loop":
-            print(f"  Scorer type: {self.scorer_type}")
+            print(f"  Eval metrics: {self.eval_metrics}")
 
     def prepare_ego_replay_actions(self):
         """
@@ -197,10 +199,19 @@ class BaseEvaluator:
                 if log_state is not None and log_state.get('valid', False):
                     ego_vehicle = env.agent
 
+                    # Convert world coordinates → simulation coordinates.
+                    # position_offset = world_pos_0 - sim_pos_0, so:
+                    #   sim_pos = world_pos - position_offset
+                    world_pos = np.array(log_state['position'])
+                    sim_pos = world_pos[:2] - self.position_offset[:2]
+
+                    world_heading = log_state['heading_theta']
+                    sim_heading = world_heading - self.heading_offset
+
                     # Set position, heading, velocity, and angular velocity
                     # (same as MetaDrive's ReplayTrafficParticipantPolicy)
-                    ego_vehicle.set_position(log_state['position'])
-                    ego_vehicle.set_heading_theta(log_state['heading_theta'])
+                    ego_vehicle.set_position(sim_pos)
+                    ego_vehicle.set_heading_theta(sim_heading)
                     ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=True)
                     if 'angular_velocity' in log_state:
                         ego_vehicle.set_angular_velocity(log_state['angular_velocity'])
@@ -380,6 +391,16 @@ class BaseEvaluator:
 
     def perceive(self, env, frame_id):
         """Capture images from all cameras."""
+        # Let the adapter drive perception (e.g. rasterized_3d mode)
+        custom_imgs = self.model_adapter.perceive(env, frame_id)
+        if custom_imgs is not None:
+            if self.enable_vis and custom_imgs:
+                frame_output_path = self.output_dir / f"{frame_id:05d}"
+                frame_output_path.mkdir(parents=True, exist_ok=True)
+                for cam_name, img in custom_imgs.items():
+                    cv2.imwrite(str(frame_output_path / f"{cam_name.lower()}.jpg"), img[:, :, ::-1])
+            return custom_imgs
+
         imgs = {}
         sensor = env.engine.get_sensor('rgb_camera')
         camera_configs = self.model_adapter.get_camera_configs()
@@ -1348,6 +1369,119 @@ class BaseEvaluator:
         except Exception as e:
             print(f"Warning: Failed to visualize BEV embeddings at frame {frame_id}: {e}")
 
+    def render_cam_f0_vis(self, env, frame_id, ego_state, plan_traj_ego):
+        """
+        Annotate the saved cam_f0.jpg with projected planned trajectory, route waypoints,
+        and target waypoint using the reference visualizer style (ribbon overlay).
+
+        plan_traj_ego: (N, 2) array — col0 = lateral (left+), col1 = forward (meters).
+        Reads cam_f0.jpg, draws overlays in-place, and overwrites the file.
+        """
+        frame_output_path = self.output_dir / f"{frame_id:05d}"
+        cam_path = frame_output_path / "cam_f0.jpg"
+        if not cam_path.exists():
+            return
+        try:
+            import sys as _sys
+            _scripts_dir = str(Path(__file__).resolve().parent.parent.parent.parent / "scripts")
+            if _scripts_dir not in _sys.path:
+                _sys.path.insert(0, _scripts_dir)
+            from vis_trajectory_on_cam import draw_trajectory_ribbon
+
+            img = cv2.imread(str(cam_path))
+            if img is None:
+                return
+            H, W = img.shape[:2]
+            F = cv2.FONT_HERSHEY_SIMPLEX
+
+            # ---- Camera config ----
+            cam_configs = self.model_adapter.get_camera_configs()
+            cam_cfg = cam_configs.get('CAM_F0', None)
+            if cam_cfg is None:
+                return
+
+            # ---- World-to-ego transform ----
+            ego_pos = ego_state['position'][:2]
+            ego_hdg = ego_state['heading']
+            cos_h = np.cos(-ego_hdg)
+            sin_h = np.sin(-ego_hdg)
+
+            # ---- Route waypoints in ego frame (first 20, matching reference) ----
+            # Use [:2] to guard against 3D positions in route entries
+            route_ego = None
+            if self.route and len(self.route) > 0:
+                rp = np.array([entry[0][:2] for entry in list(self.route)[:20]], dtype=float)
+                dr = rp - ego_pos
+                route_ego = np.empty((len(rp), 2), dtype=float)
+                route_ego[:, 0] = sin_h * dr[:, 0] + cos_h * dr[:, 1]
+                route_ego[:, 1] = cos_h * dr[:, 0] - sin_h * dr[:, 1]
+
+            # ---- Target waypoint in ego frame ----
+            target_ego = None
+            wp_world = ego_state.get('waypoint')
+            if wp_world is not None:
+                dt = np.asarray(wp_world, dtype=float)[:2] - ego_pos
+                target_ego = np.array([sin_h * dt[0] + cos_h * dt[1],
+                                       cos_h * dt[0] - sin_h * dt[1]])
+
+            # ---- Draw ribbon (yellow), route dots (red), target pole (green) ----
+            # target_pt_ego is passed to draw_trajectory_ribbon which calls
+            # _draw_route_and_target: projects base (z=0) and top (z=1.5),
+            # draws a green vertical pole + sphere, matching the reference exactly.
+            img = draw_trajectory_ribbon(
+                img,
+                plan_traj_ego if plan_traj_ego is not None else np.zeros((0, 2)),
+                cam_cfg,
+                color=(255, 255, 0),
+                path_width=0.9,
+                alpha=0.6,
+                route_pts_ego=route_ego,
+                target_pt_ego=target_ego,
+            )
+
+            # ---- HUD (reference style: green text or red crash bar) ----
+            speed = float(np.linalg.norm(ego_state.get('velocity', np.zeros(3))[:2])) * 3.6
+            model_name = type(self.model_adapter).__name__.replace('Adapter', '')
+            v = env.agent
+            is_crash = v.crash_vehicle or v.crash_object or v.crash_human
+
+            if is_crash:
+                cv2.rectangle(img, (0, 0), (W, 35), (0, 0, 180), -1)
+                cv2.putText(img, f"CRASH!  |  Frame {frame_id}  {speed:.0f}km/h",
+                            (10, 25), F, 0.7, (255, 255, 255), 2)
+            else:
+                cv2.putText(img, f"{model_name}  |  Frame {frame_id}  {speed:.0f}km/h",
+                            (10, 25), F, 0.6, (0, 220, 0), 2)
+
+            cv2.imwrite(str(cam_path), img)
+        except Exception as e:
+            print(f"Warning: render_cam_f0_vis frame {frame_id} failed: {e}")
+
+    def generate_mp4(self, frame_ids, filename, source_filename, fps=10):
+        """Helper to generate MP4 from per-frame image sequences."""
+        print(f"\nGenerating MP4 {filename} from {source_filename}...")
+        try:
+            paths = [self.output_dir / f"{fid:05d}" / source_filename for fid in frame_ids]
+            paths = [p for p in paths if p.exists()]
+            if not paths:
+                print(f"No images found for {filename}")
+                return
+            first = cv2.imread(str(paths[0]))
+            if first is None:
+                print(f"Could not read first frame for {filename}")
+                return
+            h, w = first.shape[:2]
+            mp4_path = self.output_dir / filename
+            writer = cv2.VideoWriter(str(mp4_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+            for p in paths:
+                frame = cv2.imread(str(p))
+                if frame is not None:
+                    writer.write(frame)
+            writer.release()
+            print(f"✓ Saved MP4 to: {mp4_path}")
+        except Exception as e:
+            print(f"Warning: Failed to generate {filename}: {e}")
+
     def generate_gif(self, frame_ids, filename, source_filename):
         """Helper to generate GIFs from image sequences."""
         print(f"\nGenerating GIF {filename} from {source_filename}...")
@@ -1398,6 +1532,9 @@ class BaseEvaluator:
         ego_state['waypoint'] = waypoint_pos
         ego_state['command'] = command
 
+        # Cache target waypoint for next frame's cam visualization
+        self._cached_target_waypoint = waypoint_pos
+
         # 4. Prepare model input
         model_input = self.model_adapter.prepare_input(
             images=imgs,
@@ -1445,6 +1582,7 @@ class BaseEvaluator:
 
             self.cached_plan_traj_world = np.stack((world_x, world_y), axis=1)
             self.cached_model_output = model_output
+            self.cached_parsed_output = parsed_output
             self.last_replan_frame = frame_id
             self.cached_prediction_position = ego_state['position'].copy()
             self.cached_prediction_heading = ego_state['heading']
@@ -1533,123 +1671,13 @@ class BaseEvaluator:
                 ego_state['waypoint'], ego_state['command'],
                 planned_traj_world=world_traj, planned_traj_ego=plan_traj
             )
+            self.render_cam_f0_vis(env, frame_id, ego_state, plan_traj)
 
-            # --- save reasoning + overlay trajectory + cmd on front camera ---
-            try:
-                frame_output_path = self.output_dir / f"{frame_id:05d}"
-                frame_output_path.mkdir(parents=True, exist_ok=True)
-
-                # Reasoning (cached from last replan)
-                reasoning = None
-                if hasattr(self, "cached_parsed_output") and isinstance(self.cached_parsed_output, dict):
-                    reasoning = self.cached_parsed_output.get("reasoning", None)
-
-                if reasoning:
-                    (frame_output_path / "reasoning.txt").write_text(str(reasoning))
-
-                cam_name = "CAM_FRONT_WIDE"
-                cam_img_path = frame_output_path / f"{cam_name.lower()}.jpg"
-
-                # Fallbacks
-                if not cam_img_path.exists():
-                    for alt in [
-                        frame_output_path / "rgb_camera.jpg",
-                        frame_output_path / "cam_front.jpg",
-                        frame_output_path / "cam_front_wide.jpg",
-                    ]:
-                        if alt.exists():
-                            cam_img_path = alt
-                            break
-
-                if cam_img_path.exists():
-                    img = cv2.imread(str(cam_img_path))
-                    if img is not None:
-                        cam_configs = self.model_adapter.get_camera_configs()
-                        cam_config = cam_configs.get(cam_name, {})
-
-                        H, W = img.shape[:2]
-
-                        # Camera pose (used only for rough visualization)
-                        c_forward = float(cam_config.get('x', 1.3))
-                        c_lateral = float(cam_config.get('y', 0.0))
-                        c_up = float(cam_config.get('z', 1.22))
-
-                        # Intrinsics from horizontal FOV
-                        fov = float(cam_config.get('fov', 120))
-                        fov_rad = np.radians(fov)
-                        f_x = (W / 2.0) / np.tan(fov_rad / 2.0)
-                        f_y = f_x
-                        c_x = W / 2.0
-                        c_y = H / 2.0
-
-                        # Build caption (cmd + reasoning)
-                        cmd_map = {0: "LEFT", 1: "RIGHT", 2: "STRAIGHT", 3: "LANEFOLLOW", -1: "VOID"}
-                        cmd_str = cmd_map.get(int(ego_state.get("command", -1)), str(ego_state.get("command", -1)))
-
-                        reasoning_clean = None
-                        if reasoning:
-                            reasoning_clean = str(reasoning).replace("\n", " ").strip()
-                            reasoning_clean = reasoning_clean[:180]
-
-                        lines = [
-                            f"frame={frame_id:05d} cmd={cmd_str} speed={ego_state.get('speed', 0.0):.2f}",
-                        ]
-                        if reasoning_clean:
-                            lines.append("reason: " + reasoning_clean[:90])
-                            if len(reasoning_clean) > 90:
-                                lines.append("        " + reasoning_clean[90:180])
-
-                        self._put_multiline(img, lines, x=20, y=40, line_h=26)
-
-                        # Project planned trajectory: plan_traj is [lateral(left+), forward(+)]
-                        pts = []
-                        for p in plan_traj:
-                            lateral = float(p[0])
-                            forward = float(p[1])
-
-                            # visualization-friendly depth so near points still project
-                            Z_cv = forward + max(c_forward, 1.0)
-                            if Z_cv <= 0.2:
-                                continue
-
-                            X_cv = -lateral
-                            Y_cv = c_up
-
-                            u = (X_cv * f_x / Z_cv) + c_x
-                            v = (Y_cv * f_y / Z_cv) + c_y
-
-                            if 0 <= u < W and 0 <= v < H:
-                                pts.append((int(u), int(v)))
-
-                        if len(pts) > 1:
-                            for i in range(len(pts) - 1):
-                                cv2.line(img, pts[i], pts[i + 1], (0, 0, 255), 2)
-                                cv2.circle(img, pts[i], 3, (0, 255, 255), -1)
-                        else:
-                            # debug marker so you can tell when projection produced nothing
-                            cv2.putText(img, "NO TRAJ PROJ", (20, H - 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-                        # Draw target waypoint in ego frame (green dot)
-                        lateral_t = float(target_ego[0])
-                        forward_t = float(target_ego[1])
-                        Z_cv = forward_t + max(c_forward, 1.0)
-                        if Z_cv > 0.2:
-                            X_cv = -lateral_t
-                            Y_cv = c_up
-                            u = (X_cv * f_x / Z_cv) + c_x
-                            v = (Y_cv * f_y / Z_cv) + c_y
-                            if 0 <= u < W and 0 <= v < H:
-                                cv2.circle(img, (int(u), int(v)), 8, (0, 255, 0), -1)
-
-                        cv2.imwrite(str(cam_img_path), img)
-
-            except Exception as e:
-                print(f"Warning: Failed to overlay trajectory on front camera: {e}")
-
-            # DiffusionDriveV2 candidate visualizations (unchanged)
-            if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter' and self.cached_model_output is not None:
-                parsed = self.model_adapter.parse_output(self.cached_model_output, ego_state)
+            # Render DiffusionDriveV2-specific candidate visualizations
+            # Use cached prediction pose (not current ego pose) so candidates stay anchored to prediction point
+            if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter' and self.cached_parsed_output is not None:
+                parsed = self.cached_parsed_output
+                # Use prediction-time pose for candidate transformations
                 pred_pos = self.cached_prediction_position
                 pred_heading = self.cached_prediction_heading
 
@@ -1673,6 +1701,7 @@ class BaseEvaluator:
                         prediction_heading=pred_heading
                     )
 
+                # Render all 200 coarse candidates visualization
                 if 'trajectory_coarse' in parsed:
                     coarse_scores = parsed.get('coarse_scores', None)
                     self.render_topdown_bev_candidates_coarse(
@@ -1683,6 +1712,24 @@ class BaseEvaluator:
                         prediction_position=pred_pos,
                         prediction_heading=pred_heading
                     )
+
+            # Render DiffusionDrive v1 scorer candidate visualizations
+            if type(self.model_adapter).__name__ == 'DiffusionDriveAdapter' and self.cached_parsed_output is not None:
+                if hasattr(self.model_adapter, 'scorer') and self.model_adapter.scorer is not None:
+                    parsed = self.cached_parsed_output
+                    pred_pos = self.cached_prediction_position
+                    pred_heading = self.cached_prediction_heading
+
+                    if 'trajectory_coarse' in parsed:
+                        coarse_scores = parsed.get('coarse_scores', None)
+                        self.render_topdown_bev_candidates_coarse(
+                            env, frame_id, ego_state['position'], ego_state['heading'],
+                            trajectory_coarse_ego=parsed['trajectory_coarse'],
+                            coarse_scores=coarse_scores,
+                            planned_traj_world=world_traj,
+                            prediction_position=pred_pos,
+                            prediction_heading=pred_heading
+                        )
 
         # 12. Visualize model outputs only when model runs
         if self.enable_vis and replan_offset == 0:
@@ -1815,17 +1862,24 @@ class BaseEvaluator:
         print("Environment reset successful")
         
         # Initialize Scorers
+        ScorerClass = PDMSScorer if self.eval_metrics == "pdms" else EPDMSScorer
+        print(f"[INFO] Using {self.eval_metrics.upper()} scoring metrics (ScorerClass={ScorerClass.__name__})")
+
         if self.eval_mode == "open_loop":
-            self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
+            self.epdms_scorer = ScorerClass(self.scenario_data, env)
             self.epdms_results_openloop = []
         else:
             # Closed loop mode
             self.stats_manager = OfflineStatisticsManager(self.output_dir, self.scenario_name, self.scenario_data)
 
-            # Initialize EPDMS scorer for closed-loop (uses score_frame_live)
-            self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
+            # Initialize scorer for closed-loop (uses score_frame_live)
+            self.epdms_scorer = ScorerClass(self.scenario_data, env)
             self.epdms_scorer.reset_live_state()  # Reset motion history for new episode
             self.epdms_results_closedloop = []
+
+        # Initialize EPDMS trajectory scorer if model adapter uses one
+        if hasattr(self.model_adapter, 'scorer') and hasattr(self.model_adapter.scorer, 'initialize'):
+            self.model_adapter.scorer.initialize(self.scenario_data, env)
 
         prev_velocity = np.array([0.0, 0.0, 0.0])
         prev_heading = 0.0
@@ -1833,9 +1887,9 @@ class BaseEvaluator:
         # Main evaluation loop
         scenario_length = self.scenario_data['length']
         if self.eval_frames is not None:
-            # Limit frames: replay + eval, capped by scenario length
-            num_frames = min(self.ego_replay_frames + self.eval_frames, scenario_length)
-            print(f"Frame limit: {self.ego_replay_frames} replay + {self.eval_frames} eval = {num_frames} total (scenario has {scenario_length})")
+            # Limit frames: score_start_frame + eval, capped by scenario length
+            num_frames =  min(self.score_start_frame + self.eval_frames, scenario_length)
+            print(f"Frame limit: {self.score_start_frame} start + {self.eval_frames} eval = {num_frames} total (scenario has {scenario_length})")
         else:
             num_frames = scenario_length
         frame_ids = list(range(num_frames))
@@ -1922,7 +1976,6 @@ class BaseEvaluator:
                 # Check termination
                 if (done or truncated) and not self.has_terminated:
                     self.has_terminated = True
-                    print(f"Episode terminated at frame {frame_id}")
                     break
 
         finally:
@@ -1993,7 +2046,7 @@ class BaseEvaluator:
                         route_completion = actual_rc_delta
                         print(f"[INFO] Route completion: {route_completion:.4f} (delta from baseline {self.route_completion_baseline:.4f})")
                 else:
-                    route_completion = raw_route_completion
+                    route_completion = 0.0
 
                 # Finalize stats manager (legacy scoring)
                 from metadrive.constants import TerminationState
@@ -2029,9 +2082,11 @@ class BaseEvaluator:
                         mean_ttc = df_valid['time_to_collision_within_bound'].mean()
                         mean_lk = df_valid['lane_keeping'].mean()
                         mean_hc = df_valid['history_comfort'].mean()
-                        mean_ec = df_valid['extended_comfort'].mean()
+                        has_ec = 'extended_comfort' in df_valid.columns
+                        mean_ec = df_valid['extended_comfort'].mean() if has_ec else None
 
-                        print("\n=== CLOSED-LOOP EPDMS RESULTS ===")
+                        metrics_label = self.eval_metrics.upper()
+                        print(f"\n=== CLOSED-LOOP {metrics_label} RESULTS ===")
                         print(f"  Per-frame metrics (averaged over {len(df_valid)} valid frames):")
                         print(f"    No At-Fault Collisions:      {mean_nc:.4f}")
                         print(f"    Drivable Area Compliance:    {mean_dac:.4f}")
@@ -2040,17 +2095,18 @@ class BaseEvaluator:
                         print(f"    Time-to-Collision:           {mean_ttc:.4f}")
                         print(f"    Lane Keeping:                {mean_lk:.4f}")
                         print(f"    History Comfort:             {mean_hc:.4f}")
-                        print(f"    Extended Comfort:            {mean_ec:.4f}")
-                        print(f"  Mean EPDMS (no EP):            {mean_epdms:.4f}")
+                        if has_ec:
+                            print(f"    Extended Comfort:            {mean_ec:.4f}")
+                        print(f"  Mean {metrics_label} (no EP):            {mean_epdms:.4f}")
                         print(f"  Route Completion:              {route_completion:.4f}")
                         print(f"  ----------------------------------------")
                         print(f"  FINAL SCORE: {mean_epdms:.4f} × {route_completion:.4f} = {final_score:.4f}")
 
                         # Save per-frame results to CSV
                         timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-                        epdms_csv_path = self.output_dir / f"{timestamp}_closedloop_epdms_perframe.csv"
+                        epdms_csv_path = self.output_dir / f"{timestamp}_closedloop_{self.eval_metrics}_perframe.csv"
                         df.to_csv(epdms_csv_path, index=False)
-                        print(f"  Saved per-frame EPDMS to {epdms_csv_path}")
+                        print(f"  Saved per-frame {metrics_label} to {epdms_csv_path}")
 
                         # Save summary to CSV
                         summary_dict = {
@@ -2061,26 +2117,27 @@ class BaseEvaluator:
                             'mean_time_to_collision': mean_ttc,
                             'mean_lane_keeping': mean_lk,
                             'mean_history_comfort': mean_hc,
-                            'mean_extended_comfort': mean_ec,
-                            'mean_epdms_no_ep': mean_epdms,
+                            f'mean_{self.eval_metrics}_no_ep': mean_epdms,
                             'route_completion': route_completion,
                             'final_score': final_score,
                             'num_valid_frames': len(df_valid),
                             'num_total_frames': len(df),
                         }
-                        summary_csv_path = self.output_dir / f"{timestamp}_closedloop_epdms_summary.csv"
+                        if has_ec:
+                            summary_dict['mean_extended_comfort'] = mean_ec
+                        summary_csv_path = self.output_dir / f"{timestamp}_closedloop_{self.eval_metrics}_summary.csv"
                         pd.DataFrame([summary_dict]).to_csv(summary_csv_path, index=False)
-                        print(f"  Saved EPDMS summary to {summary_csv_path}")
+                        print(f"  Saved {metrics_label} summary to {summary_csv_path}")
                     else:
-                        print("\n[WARNING] No valid EPDMS frames found for closed-loop scoring.")
+                        print(f"\n[WARNING] No valid {self.eval_metrics.upper()} frames found for closed-loop scoring.")
 
-            # Generate GIFs from visualizations
+            # Generate GIFs and MP4s from visualizations
             if self.enable_vis:
                 self.generate_gif(frame_ids, "topdown_visualization.gif", "topdown.png")
+                self.generate_mp4(frame_ids, "cam_f0.mp4", "cam_f0.jpg")
                 self.generate_gif(frame_ids, "segmentation_visualization.gif", "segmentation_vis.png")
                 self.generate_gif(frame_ids, "occupancy_visualization.gif", "occupancy_vis.png")
                 self.generate_gif(frame_ids, "bev_embed_visualization.gif", "bev_embed_vis.png")
-                self.generate_gif(frame_ids, "cam_front_wide.gif", "cam_front_wide.jpg")
                 # self.generate_gif(frame_ids, "third_persom.gif", "cam_third_person.jpg")
 
                 # Generate replan summary (single image showing all replans with top-k coverage)
@@ -2092,6 +2149,11 @@ class BaseEvaluator:
                     self.generate_gif(frame_ids, "topdown_topk_visualization.gif", "topdown_topk.png")
                     self.generate_gif(frame_ids, "topdown_finegrained_visualization.gif", "topdown_finegrained.png")
                     self.generate_gif(frame_ids, "topdown_coarse_visualization.gif", "topdown_coarse.png")
+
+                # Generate DiffusionDrive v1 scorer candidate visualization GIF
+                if type(self.model_adapter).__name__ == 'DiffusionDriveAdapter':
+                    if hasattr(self.model_adapter, 'scorer') and self.model_adapter.scorer is not None:
+                        self.generate_gif(frame_ids, "topdown_coarse_visualization.gif", "topdown_coarse.png")
 
             if self.env_manager is not None:
                 self.env_manager.close()

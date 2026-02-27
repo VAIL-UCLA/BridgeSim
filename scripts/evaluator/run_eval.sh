@@ -6,14 +6,14 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 cd "$REPO_ROOT/bridgesim/evaluation"
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/metadrive:$PYTHONPATH"
 
 # Configuration
 GPU_ID="${3:-${GPU_ID:-0}}"
-export CUDA_VISIBLE_DEVICES=$GPU_ID
 MODEL_TYPE="${1:-transfuser}"
 SCENARIO_PATH="${2:-}"
 OUTPUT_BASE="${REPO_ROOT}/outputs/single_eval"
-TRAFFIC_MODE="log_replay"
+TRAFFIC_MODE="IDM"  # Options: no_traffic, log_replay, IDM
 
 # Check if scenario path is provided
 if [ -z "$SCENARIO_PATH" ]; then
