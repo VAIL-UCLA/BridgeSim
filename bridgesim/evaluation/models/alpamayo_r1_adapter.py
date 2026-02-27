@@ -167,11 +167,6 @@ class AlpamayoSubprocessClient:
 
             return json.loads(out_json.read_text())
 
-
-# -------------------------
-# Adapter
-# -------------------------
-
 class AlpamayoR1Adapter(BaseModelAdapter):
     """
     BridgeSim adapter for Alpamayo-R1, using a separate Alpamayo venv.

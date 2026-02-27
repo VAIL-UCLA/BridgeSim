@@ -15,7 +15,7 @@
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-cd "$SCRIPT_DIR/../bridgesim/evaluation"
+cd "$REPO_ROOT/bridgesim/evaluation"
 
 # Configuration
 MODEL_TYPE="${1:-uniad}"
