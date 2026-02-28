@@ -1,5 +1,5 @@
 """
-Alpamayo-R1 adapter (BridgeSim -> Alpamayo via separate venv)
+Alpamayo-R1 adapter (BridgeSim -> Alpamayo via persistent venv subprocess)
 """
 
 from __future__ import annotations
@@ -74,13 +74,67 @@ class AlpamayoR1AdapterConfig:
 
 class AlpamayoSubprocessClient:
     """
-    Calls Alpamayo inference using a dedicated venv python.
+    Persistent subprocess wrapper for Alpamayo inference.
+
+    The server process is launched once in __init__, loads the model, and then
+    waits for JSON request lines on stdin. Each call to infer() writes the
+    frame data to temp files, sends a JSON request, and reads the JSON response.
     """
 
-    def __init__(self, alp_python: str, alp_script: str, model_name: str):
+    def __init__(
+        self,
+        alp_python: str,
+        alp_script: str,
+        model_name: str,
+        *,
+        top_p: float,
+        temperature: float,
+        num_traj_samples: int,
+        max_generation_length: int,
+        coord_mode: str,
+        cuda_launch_blocking: bool,
+    ):
         self.alp_python = alp_python
         self.alp_script = alp_script
         self.model_name = model_name
+        self._proc: Optional[subprocess.Popen] = None
+
+        cmd = [
+            "env",
+            "-u", "PYTHONUTF8",
+            "-u", "PYTHONHOME",
+            "-u", "PYTHONPATH",
+        ]
+        if cuda_launch_blocking:
+            cmd += ["CUDA_LAUNCH_BLOCKING=1"]
+        cmd += [
+            str(alp_python),
+            str(alp_script),
+            "--model", str(model_name),
+            "--top-p", str(top_p),
+            "--temperature", str(temperature),
+            "--num-traj-samples", str(num_traj_samples),
+            "--max-generation-length", str(max_generation_length),
+            "--coord-mode", str(coord_mode),
+        ]
+
+        print("[AlpamayoSubprocessClient] Starting server process (model will load now)...")
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,  # inherit parent stderr so loading messages are visible
+            text=True,
+        )
+
+        # Wait for the server to signal it's ready
+        ready_line = self._proc.stdout.readline().strip()
+        if ready_line != "READY":
+            self._proc.kill()
+            raise RuntimeError(
+                f"[AlpamayoSubprocessClient] Expected 'READY' from server, got: {ready_line!r}"
+            )
+        print("[AlpamayoSubprocessClient] Server ready.")
 
     def infer(
         self,
@@ -88,17 +142,11 @@ class AlpamayoSubprocessClient:
         ego_xyz_world: np.ndarray,
         ego_rot_yaw: np.ndarray,
         *,
-        top_p: float,
-        temperature: float,
-        num_traj_samples: int,
-        max_generation_length: int,
         nav_cmd: str,
-        coord_mode: str,
-        cuda_launch_blocking: bool,
     ) -> dict:
-        """
-        Run one Alpamayo inference in a separate venv subprocess.
-        """
+        if self._proc is None or self._proc.poll() is not None:
+            raise RuntimeError("[AlpamayoSubprocessClient] Server process is not running.")
+
         img = image_stack_uint8_nhwc
         if img.ndim == 3:
             img = img[None, ...]
@@ -110,81 +158,49 @@ class AlpamayoSubprocessClient:
             img_npy = td / "img.npy"
             ego_xyz_npy = td / "ego_xyz.npy"
             ego_rot_npy = td / "ego_rot.npy"
-            out_json = td / "out.json"
 
             np.save(img_npy, img)
             np.save(ego_xyz_npy, ego_xyz_world)
             np.save(ego_rot_npy, ego_rot_yaw)
 
-            cmd = [
-                "env",
-                "-u",
-                "PYTHONUTF8",
-                "-u",
-                "PYTHONHOME",
-                "-u",
-                "PYTHONPATH",
-            ]
+            req = {
+                "image_npy": str(img_npy),
+                "ego_xyz_npy": str(ego_xyz_npy),
+                "ego_rot_npy": str(ego_rot_npy),
+                "nav_cmd": nav_cmd,
+            }
+            self._proc.stdin.write(json.dumps(req) + "\n")
+            self._proc.stdin.flush()
 
-            if cuda_launch_blocking:
-                cmd += ["CUDA_LAUNCH_BLOCKING=1"]
+            response_line = self._proc.stdout.readline()
 
-            cmd += [
-                str(self.alp_python),
-                str(self.alp_script),
-                "--model",
-                str(self.model_name),
-                "--image-npy",
-                str(img_npy),
-                "--ego-xyz-npy",
-                str(ego_xyz_npy),
-                "--ego-rot-npy",
-                str(ego_rot_npy),
-                "--out-json",
-                str(out_json),
-                "--top-p",
-                str(top_p),
-                "--temperature",
-                str(temperature),
-                "--num-traj-samples",
-                str(num_traj_samples),
-                "--max-generation-length",
-                str(max_generation_length),
-                "--nav-cmd",
-                str(nav_cmd),
-                "--coord-mode",
-                str(coord_mode),
-            ]
+        if not response_line:
+            raise RuntimeError("[AlpamayoSubprocessClient] Server process closed stdout unexpectedly.")
 
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+        result = json.loads(response_line)
+        if "error" in result:
+            raise RuntimeError(
+                f"[AlpamayoSubprocessClient] Server reported error:\n"
+                f"{result.get('error')}\n{result.get('traceback', '')}"
             )
+        return result
 
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"[AlpamayoSubprocessClient] Alpamayo subprocess failed (code={proc.returncode})\n"
-                    f"CMD:\n{' '.join(cmd)}\n"
-                    f"STDOUT:\n{proc.stdout}\n"
-                    f"STDERR:\n{proc.stderr}\n"
-                )
+    def close(self):
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.stdin.close()
+                self._proc.wait(timeout=10)
+            except Exception:
+                self._proc.kill()
+        self._proc = None
 
-            if not out_json.exists():
-                raise RuntimeError(
-                    f"[AlpamayoSubprocessClient] Expected output JSON not found: {out_json}\n"
-                    f"CMD:\n{' '.join(cmd)}\n"
-                    f"STDOUT:\n{proc.stdout}\n"
-                    f"STDERR:\n{proc.stderr}\n"
-                )
-
-            return json.loads(out_json.read_text())
+    def __del__(self):
+        self.close()
 
 
 class AlpamayoR1Adapter(BaseModelAdapter):
     """
-    BridgeSim adapter for Alpamayo-R1, using a separate Alpamayo venv.
+    BridgeSim adapter for Alpamayo-R1, using a persistent Alpamayo venv subprocess.
     """
 
     def __init__(self, checkpoint_path: str, config_path: str = None, **kwargs):
@@ -304,16 +320,16 @@ class AlpamayoR1Adapter(BaseModelAdapter):
 
         # Add CAM_F0 alias (no extra rendering)
         if "CAM_FRONT_WIDE" in imgs:
-            imgs["CAM_F0"] = imgs["CAM_FRONT_WIDE"]  # or imgs["CAM_FRONT_WIDE"].copy() if needed for isolation
+            imgs["CAM_F0"] = imgs["CAM_FRONT_WIDE"]
 
         return imgs
 
     def load_model(self):
         """
-        Validate alpamayo python/script exist and initialize the subprocess client.
-        Alpamayo weights are loaded inside the subprocess.
+        Launch the persistent Alpamayo server subprocess and wait for it to load
+        the model. All subsequent inference calls reuse the same process.
         """
-        print("Loading Alpamayo-R1 adapter (venv subprocess mode)...")
+        print("Loading Alpamayo-R1 adapter (persistent venv subprocess)...")
         print(f"  alp_python: {self.cfg.alp_python}")
         print(f"  alp_script: {self.cfg.alp_script}")
 
@@ -327,15 +343,21 @@ class AlpamayoR1Adapter(BaseModelAdapter):
         if not os.path.isfile(self.cfg.alp_script):
             raise FileNotFoundError(
                 f"Alpamayo glue script not found: {self.cfg.alp_script}\n"
-                f"Expected it in BridgeSim/tools/bridgesim_infer_once.py or set ALPAMAYO_SCRIPT."
+                f"Expected it at {self.cfg.alp_script} or set ALPAMAYO_SCRIPT."
             )
 
         self.client = AlpamayoSubprocessClient(
             alp_python=self.cfg.alp_python,
             alp_script=self.cfg.alp_script,
-            model_name=self.checkpoint_path,  # HF repo id
+            model_name=self.checkpoint_path,
+            top_p=self.cfg.top_p,
+            temperature=self.cfg.temperature,
+            num_traj_samples=self.cfg.num_traj_samples,
+            max_generation_length=self.cfg.max_generation_length,
+            coord_mode=self.cfg.coord_mode,
+            cuda_launch_blocking=self.cfg.cuda_launch_blocking,
         )
-        print("Alpamayo-R1 adapter ready (model loads inside subprocess on first call).")
+        print("Alpamayo-R1 adapter ready.")
 
     def prepare_input(
         self,
@@ -431,13 +453,7 @@ class AlpamayoR1Adapter(BaseModelAdapter):
             image_stack_uint8_nhwc=model_input["img_stack"],
             ego_xyz_world=model_input["ego_xyz_world"],
             ego_rot_yaw=model_input["ego_yaw_world"],
-            top_p=self.cfg.top_p,
-            temperature=self.cfg.temperature,
-            num_traj_samples=self.cfg.num_traj_samples,
-            max_generation_length=self.cfg.max_generation_length,
             nav_cmd=model_input.get("nav_cmd", "STRAIGHT"),
-            coord_mode=self.cfg.coord_mode,
-            cuda_launch_blocking=self.cfg.cuda_launch_blocking,
         )
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:

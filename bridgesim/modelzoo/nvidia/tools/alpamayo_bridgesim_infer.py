@@ -1,5 +1,23 @@
+"""
+Persistent inference server for Alpamayo-R1.
+
+Launched once by AlpamayoSubprocessClient. Loads the model, prints "READY" to
+stdout, then loops reading JSON request lines from stdin and writing JSON result
+lines to stdout.
+
+Request  (stdin, one JSON line per frame):
+    {"image_npy": "<path>", "ego_xyz_npy": "<path>", "ego_rot_npy": "<path>", "nav_cmd": "<str>"}
+
+Response (stdout, one JSON line per frame):
+    {"trajectory_lateral_forward": [[lat, fwd], ...], "reasoning": "<str|null>"}
+    {"error": "<msg>"}   -- on failure
+
+All model-level params (top_p, temperature, coord_mode, …) are fixed at startup
+via CLI args.
+"""
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,11 +27,11 @@ from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
 from alpamayo_r1 import helper
 
 
+# ---------------------------------------------------------------------------
+# Geometry helpers (unchanged from original)
+# ---------------------------------------------------------------------------
+
 def yaw_to_rotmat(yaw: np.ndarray) -> np.ndarray:
-    """
-    yaw: (...,) radians
-    returns: (..., 3, 3)
-    """
     c = np.cos(yaw).astype(np.float32)
     s = np.sin(yaw).astype(np.float32)
     R = np.zeros(yaw.shape + (3, 3), dtype=np.float32)
@@ -25,27 +43,17 @@ def yaw_to_rotmat(yaw: np.ndarray) -> np.ndarray:
     return R
 
 
-def world_to_ego_local(ego_xyz: np.ndarray, ego_rotmats: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Convert world-frame history to ego-local frame at t0 (last step).
-    """
-    t0_xyz = ego_xyz[:, :, -1, :]          # (1,1,3)
-    t0_R = ego_rotmats[:, :, -1, :, :]     # (1,1,3,3)
-    t0_R_inv = np.swapaxes(t0_R, -1, -2)   # transpose (rotation inverse)
-
-    dxyz = ego_xyz - t0_xyz[:, :, None, :]  # (1,1,T,3)
-
+def world_to_ego_local(ego_xyz: np.ndarray, ego_rotmats: np.ndarray):
+    t0_xyz = ego_xyz[:, :, -1, :]
+    t0_R = ego_rotmats[:, :, -1, :, :]
+    t0_R_inv = np.swapaxes(t0_R, -1, -2)
+    dxyz = ego_xyz - t0_xyz[:, :, None, :]
     xyz_local = np.einsum("...ij,...tj->...ti", t0_R_inv, dxyz).astype(np.float32)
     rot_local = np.einsum("...ij,...tjk->...tik", t0_R_inv, ego_rotmats).astype(np.float32)
     return xyz_local, rot_local
 
 
 def pad_or_trim_time(x: np.ndarray, required_T: int) -> np.ndarray:
-    """
-    x has shape (1,1,T,...) where time dim is index 2
-    - If T > required_T: keep most recent required_T
-    - If T < required_T: left-pad by repeating earliest frame
-    """
     T_cur = x.shape[2]
     if T_cur == required_T:
         return x
@@ -58,41 +66,24 @@ def pad_or_trim_time(x: np.ndarray, required_T: int) -> np.ndarray:
 
 
 def load_frames_as_expected(image_npy: str, target_n: int = 16) -> torch.Tensor:
-    """
-    Alpamayo helper expects frames: (N, C, H, W) uint8.
-    """
     img = np.load(image_npy)
-
-    # normalize to (N, H, W, 3)
     if img.ndim == 3:
         img = img[None, ...]
     if img.ndim != 4 or img.shape[-1] != 3:
         raise ValueError(f"Expected image npy as (H,W,3) or (N,H,W,3). Got {img.shape}")
-
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
-
     if img.shape[0] < target_n:
         reps = target_n - img.shape[0]
         img = np.concatenate([img[:1]] * reps + [img], axis=0)
     elif img.shape[0] > target_n:
         img = img[-target_n:]
-
-    # convert HWC -> CHW
     img = np.transpose(img, (0, 3, 1, 2))
     img = np.ascontiguousarray(img)
-
-    return torch.from_numpy(img)  # uint8 CPU (N,3,H,W)
+    return torch.from_numpy(img)
 
 
 def load_ego_history(ego_xyz_npy: str, ego_rot_npy: str, required_T: int = 16):
-    """
-    Load ego history arrays from .npy files and normalize to Alpamayo's expected history length.
-
-    Supports BOTH ego_rot formats:
-      - heading/yaw: (1,1,T) or (1,1,T,1)   (radians)
-      - rotmats:     (1,1,T,3,3)
-    """
     ego_xyz = np.load(ego_xyz_npy)
     ego_rot = np.load(ego_rot_npy)
 
@@ -100,12 +91,11 @@ def load_ego_history(ego_xyz_npy: str, ego_rot_npy: str, required_T: int = 16):
         raise ValueError(f"Expected ego_xyz shape (1,1,T,3). Got {ego_xyz.shape}")
     T = ego_xyz.shape[2]
 
-    # rot handling
     if ego_rot.ndim == 5 and ego_rot.shape[:3] == (1, 1, T) and ego_rot.shape[-2:] == (3, 3):
         ego_rotmats = ego_rot.astype(np.float32)
     elif ego_rot.ndim == 4 and ego_rot.shape[:3] == (1, 1, T) and ego_rot.shape[-1] == 1:
-        yaw = ego_rot[..., 0].astype(np.float32)  # (1,1,T)
-        ego_rotmats = yaw_to_rotmat(yaw)          # (1,1,T,3,3)
+        yaw = ego_rot[..., 0].astype(np.float32)
+        ego_rotmats = yaw_to_rotmat(yaw)
     elif ego_rot.ndim == 3 and ego_rot.shape == (1, 1, T):
         yaw = ego_rot.astype(np.float32)
         ego_rotmats = yaw_to_rotmat(yaw)
@@ -115,22 +105,13 @@ def load_ego_history(ego_xyz_npy: str, ego_rot_npy: str, required_T: int = 16):
             f"Got {ego_rot.shape}"
         )
 
-    # normalize T
     ego_xyz = pad_or_trim_time(ego_xyz.astype(np.float32), required_T)
     ego_rotmats = pad_or_trim_time(ego_rotmats.astype(np.float32), required_T)
-
-    # convert world -> ego-local at t0
     ego_xyz, ego_rotmats = world_to_ego_local(ego_xyz, ego_rotmats)
-
-    ego_history_xyz = torch.from_numpy(ego_xyz).float()
-    ego_history_rot = torch.from_numpy(ego_rotmats).float()
-    return ego_history_xyz, ego_history_rot
+    return torch.from_numpy(ego_xyz).float(), torch.from_numpy(ego_rotmats).float()
 
 
 def inject_nav_command(messages, nav_cmd: str):
-    """
-    Put NAV_COMMAND into the last user text block.
-    """
     user_content = messages[1]["content"]
     for i in range(len(user_content) - 1, -1, -1):
         if user_content[i].get("type") == "text":
@@ -138,49 +119,17 @@ def inject_nav_command(messages, nav_cmd: str):
             break
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True, type=str)
-    parser.add_argument("--image-npy", required=True, type=str)
-    parser.add_argument("--ego-xyz-npy", required=True, type=str)
-    parser.add_argument("--ego-rot-npy", required=True, type=str)
-    parser.add_argument("--out-json", required=True, type=str)
+# ---------------------------------------------------------------------------
+# Single-frame inference
+# ---------------------------------------------------------------------------
 
-    parser.add_argument("--top-p", type=float, default=0.98)
-    parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--num-traj-samples", type=int, default=1)
-    parser.add_argument("--max-generation-length", type=int, default=256)
+def run_one(model, processor, device, req: dict, args) -> dict:
+    nav_cmd = req.get("nav_cmd", "STRAIGHT")
 
-    parser.add_argument("--nav-cmd", type=str, default="STRAIGHT")
-    parser.add_argument("--debug-print-shapes", action="store_true")
-
-    parser.add_argument(
-        "--coord-mode",
-        type=str,
-        default="x_forward_y_left",
-        choices=[
-            "x_forward_y_left",     # forward=x, lateral(left)=y
-            "x_forward_y_right",    # forward=x, lateral(left)=-y
-            "x_right_y_forward",    # forward=y, lateral(left)=-x
-            "x_left_y_forward",     # forward=y, lateral(left)=x
-        ],
-    )
-
-    args = parser.parse_args()
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
-
-    # Load model
-    model = AlpamayoR1.from_pretrained(args.model, dtype=dtype).to(device)
-    model.eval()
-
-    # Inputs
-    frames = load_frames_as_expected(args.image_npy, target_n=16)  # (16,3,H,W) uint8 CPU
+    frames = load_frames_as_expected(req["image_npy"], target_n=16)
     messages = helper.create_message(frames)
-    inject_nav_command(messages, args.nav_cmd)
+    inject_nav_command(messages, nav_cmd)
 
-    processor = helper.get_processor(model.tokenizer)
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
@@ -191,7 +140,7 @@ def main():
     )
 
     ego_history_xyz, ego_history_rot = load_ego_history(
-        args.ego_xyz_npy, args.ego_rot_npy, required_T=16
+        req["ego_xyz_npy"], req["ego_rot_npy"], required_T=16
     )
 
     model_inputs = {
@@ -200,14 +149,6 @@ def main():
         "ego_history_rot": ego_history_rot,
     }
     model_inputs = helper.to_device(model_inputs, device)
-
-    if args.debug_print_shapes:
-        print("tokenized_data keys:", list(inputs.keys()))
-        for k, v in inputs.items():
-            if hasattr(v, "shape"):
-                print(k, tuple(v.shape), v.dtype, v.device)
-        print("ego_history_xyz", tuple(model_inputs["ego_history_xyz"].shape), model_inputs["ego_history_xyz"].dtype, model_inputs["ego_history_xyz"].device)
-        print("ego_history_rot", tuple(model_inputs["ego_history_rot"].shape), model_inputs["ego_history_rot"].dtype, model_inputs["ego_history_rot"].device)
 
     if device == "cuda":
         torch.cuda.manual_seed_all(42)
@@ -223,9 +164,7 @@ def main():
                 return_extra=True,
             )
 
-    # Convert to (T,2) lateral/forward
     xyz = pred_xyz.detach().float().cpu().numpy()
-    # expected: [B, num_traj_sets, num_traj_samples, T, 3]
     if xyz.ndim == 5:
         traj_xyz = xyz[0, 0, 0]
     else:
@@ -234,13 +173,9 @@ def main():
     if traj_xyz.ndim != 2 or traj_xyz.shape[1] < 2:
         traj_lat_fwd = [[0.0, 0.0] for _ in range(10)]
     else:
-        # Remove any absolute offset so controller sees a plan starting at 0,0
         traj_xyz = traj_xyz - traj_xyz[0:1]
-
         x = traj_xyz[:, 0]
         y = traj_xyz[:, 1]
-
-        # Map model XY into (forward, lateral-left) depending on coord-mode
         if args.coord_mode == "x_forward_y_left":
             forward, lateral = x, y
         elif args.coord_mode == "x_forward_y_right":
@@ -251,7 +186,6 @@ def main():
             forward, lateral = y, x
         else:
             forward, lateral = x, y
-
         traj_lat_fwd = np.stack([lateral, forward], axis=1).tolist()
 
     reasoning = None
@@ -262,14 +196,51 @@ def main():
     except Exception:
         reasoning = None
 
-    out = {
-        "trajectory_lateral_forward": traj_lat_fwd,
-        "reasoning": reasoning,
-    }
+    return {"trajectory_lateral_forward": traj_lat_fwd, "reasoning": reasoning}
 
-    out_path = Path(args.out_json)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out))
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, type=str)
+    parser.add_argument("--top-p", type=float, default=0.98)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--num-traj-samples", type=int, default=1)
+    parser.add_argument("--max-generation-length", type=int, default=256)
+    parser.add_argument(
+        "--coord-mode",
+        type=str,
+        default="x_forward_y_left",
+        choices=["x_forward_y_left", "x_forward_y_right", "x_right_y_forward", "x_left_y_forward"],
+    )
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+    print(f"[alpamayo_server] Loading {args.model} ...", file=sys.stderr, flush=True)
+    model = AlpamayoR1.from_pretrained(args.model, dtype=dtype).to(device)
+    model.eval()
+    processor = helper.get_processor(model.tokenizer)
+    print("[alpamayo_server] Model ready.", file=sys.stderr, flush=True)
+
+    # Signal the parent that we are ready to accept requests.
+    print("READY", flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+            result = run_one(model, processor, device, req, args)
+        except Exception as e:
+            import traceback
+            result = {"error": str(e), "traceback": traceback.format_exc()}
+        print(json.dumps(result), flush=True)
 
 
 if __name__ == "__main__":
