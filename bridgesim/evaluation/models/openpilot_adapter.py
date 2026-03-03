@@ -13,6 +13,7 @@ The policy model takes in up to 25 frames of vision features 0.2s apart (up to 5
 Both stages are ONNX models run via onnxruntime.
 """
 
+import codecs
 import collections
 import pickle
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any, Dict
 
 import cv2
 import numpy as np
+import onnx
 import onnxruntime as ort
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
@@ -195,6 +197,36 @@ def parse_mdn(raw, in_N, out_N, out_shape):
 # Camera intrinsic helpers
 # ---------------------------------------------------------------------------
 
+def _extract_onnx_metadata(onnx_path):
+    """
+    Extract output_slices and other metadata from an ONNX model's metadata_props.
+
+    The openpilot ONNX models embed output_slices as a base64-encoded pickle
+    in the model's metadata properties.  This function reads them using the
+    standard ``onnx`` package (no tinygrad dependency).
+    """
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    props = {p.key: p.value for p in model.metadata_props}
+
+    output_slices_b64 = props.get("output_slices")
+    if output_slices_b64 is None:
+        raise ValueError(f"No 'output_slices' metadata in {onnx_path}")
+
+    output_slices = pickle.loads(codecs.decode(output_slices_b64.encode(), "base64"))
+
+    input_shapes = {inp.name: tuple(d.dim_value for d in inp.type.tensor_type.shape.dim)
+                    for inp in model.graph.input}
+    output_shapes = {out.name: tuple(d.dim_value for d in out.type.tensor_type.shape.dim)
+                     for out in model.graph.output}
+
+    return {
+        "model_checkpoint": props.get("model_checkpoint"),
+        "output_slices": output_slices,
+        "input_shapes": input_shapes,
+        "output_shapes": output_shapes,
+    }
+
+
 def _fov_to_focal(fov_deg, pixel_width):
     """Compute focal length from horizontal FOV and image width."""
     return (pixel_width / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
@@ -272,24 +304,33 @@ class OpenPilotAdapter(BaseModelAdapter):
     # BaseModelAdapter interface
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _load_or_extract_metadata(onnx_path: Path) -> dict:
+        """Load cached metadata pkl, or extract from ONNX and cache it."""
+        meta_path = onnx_path.parent / (onnx_path.stem + "_metadata.pkl")
+        if meta_path.exists():
+            with open(meta_path, "rb") as f:
+                return pickle.load(f)
+        print(f"  Extracting metadata from {onnx_path.name}...")
+        metadata = _extract_onnx_metadata(onnx_path)
+        with open(meta_path, "wb") as f:
+            pickle.dump(metadata, f)
+        print(f"  Saved {meta_path.name}")
+        return metadata
+
     def load_model(self):
         """Load both ONNX sessions and metadata pickles."""
         print("Loading OpenPilot ONNX models...")
 
         vision_path = self.ckpt_dir / "driving_vision.onnx"
         policy_path = self.ckpt_dir / "driving_policy.onnx"
-        vision_meta_path = self.ckpt_dir / "driving_vision_metadata.pkl"
-        policy_meta_path = self.ckpt_dir / "driving_policy_metadata.pkl"
-
-        for p in [vision_path, policy_path, vision_meta_path, policy_meta_path]:
+        for p in [vision_path, policy_path]:
             if not p.exists():
-                raise FileNotFoundError(f"Required file not found: {p}")
+                raise FileNotFoundError(f"Required ONNX model not found: {p}")
 
-        # Load metadata — slices are nested under 'output_slices' key
-        with open(vision_meta_path, "rb") as f:
-            vision_meta_raw = pickle.load(f)
-        with open(policy_meta_path, "rb") as f:
-            policy_meta_raw = pickle.load(f)
+        # Load or generate metadata from ONNX model properties
+        vision_meta_raw = self._load_or_extract_metadata(vision_path)
+        policy_meta_raw = self._load_or_extract_metadata(policy_path)
 
         self.vision_meta = vision_meta_raw.get("output_slices", vision_meta_raw)
         self.policy_meta = policy_meta_raw.get("output_slices", policy_meta_raw)
