@@ -277,7 +277,7 @@ class BatchEvaluator:
 
             if result.returncode == 0:
                 # Check if output exists
-                output_dir = self.output_root / scenario_name
+                output_dir = self.output_root / "openpilot_rr10_erf20_ef20" / scenario_name
                 results_file = output_dir / "evaluation_results.json"
 
                 if results_file.exists():
@@ -293,6 +293,7 @@ class BatchEvaluator:
                         'timestamp': datetime.now().isoformat()
                     }
                 else:
+                    print(f"Results file not found for scenario: {scenario_name} at {results_file}")
                     return {
                         'status': 'error',
                         'duration': duration,
@@ -769,7 +770,7 @@ def main():
 
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
-                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
+                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot"],
                         help="Model type")
 
     parser.add_argument('--checkpoint', type=str, required=True,

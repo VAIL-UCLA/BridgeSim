@@ -1815,12 +1815,19 @@ class BaseEvaluator:
 
         # Create environment
         print("Creating environment...")
+        # Determine camera resolution from adapter's camera configs
+        camera_configs = self.model_adapter.get_camera_configs()
+        max_w = max(int(c.get('width', 1600)) for c in camera_configs.values())
+        max_h = max(int(c.get('height', 900)) for c in camera_configs.values())
+        camera_resolution = (max_w, max_h)
+
         self.env_manager = EnvironmentManager(
             self.scenario_path,
             traffic_mode=self.traffic_mode,
             render=self.enable_vis,
             image_on_cuda=False,
-            agent_policy=agent_policy
+            agent_policy=agent_policy,
+            camera_resolution=camera_resolution,
         )
 
         # Initialize controller based on type
