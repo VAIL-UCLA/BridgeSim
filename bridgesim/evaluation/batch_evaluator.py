@@ -277,7 +277,7 @@ class BatchEvaluator:
 
             if result.returncode == 0:
                 # Check if output exists
-                output_dir = self.output_root / "openpilot_rr10_erf20_ef20" / scenario_name
+                output_dir = self.output_root / scenario_name
                 results_file = output_dir / "evaluation_results.json"
 
                 if results_file.exists():

@@ -152,10 +152,6 @@ def softmax(x, axis=-1):
     return e / np.sum(e, axis=axis, keepdims=True)
 
 
-def sigmoid(x):
-    return 1.0 / (1.0 + safe_exp(-x))
-
-
 def parse_mdn(raw, in_N, out_N, out_shape):
     """
     Mixture density network output parsing (reimplemented from OpenPilot).
@@ -186,7 +182,6 @@ def parse_mdn(raw, in_N, out_N, out_shape):
                 idxs = np.argsort(weights[fidx, :, hidx])[::-1]
                 pred_mu_final[fidx, hidx] = pred_mu[fidx, idxs[0]]
     else:
-        # The current models doesn't output MHP
         pred_mu_final = pred_mu
 
     if out_N > 1:
