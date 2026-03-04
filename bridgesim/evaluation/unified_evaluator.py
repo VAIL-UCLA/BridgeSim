@@ -191,6 +191,10 @@ def create_model_adapter(args):
         from bridgesim.evaluation.models.lead_navsim_adapter import LEADNavsimAdapter
         return LEADNavsimAdapter(checkpoint_path=args.checkpoint)
 
+    elif model_type == "openpilot":
+        from bridgesim.evaluation.models.openpilot_adapter import OpenPilotAdapter
+        return OpenPilotAdapter(checkpoint_path=args.checkpoint)
+
     elif model_type == "alpamayo_r1":
         from bridgesim.evaluation.models.alpamayo_r1_adapter import AlpamayoR1Adapter
         return AlpamayoR1Adapter(
@@ -220,7 +224,7 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "alpamayo_r1"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
         help="Model type to evaluate"
     )
     parser.add_argument(
