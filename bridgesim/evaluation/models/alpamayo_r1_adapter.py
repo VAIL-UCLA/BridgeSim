@@ -14,6 +14,7 @@ from typing import Any, Deque, Dict, Optional, Tuple
 from collections import deque
 
 import numpy as np
+import torch
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 
@@ -59,7 +60,7 @@ class AlpamayoR1AdapterConfig:
     # Alpamayo generation params
     top_p: float = 0.98
     temperature: float = 0.6
-    num_traj_samples: int = 1
+    num_traj_samples: int = 20
     max_generation_length: int = 256
     coord_mode: str = "x_forward_y_left"
     max_history: int = 20  # ego history length (world frame)
@@ -143,6 +144,7 @@ class AlpamayoSubprocessClient:
         ego_rot_yaw: np.ndarray,
         *,
         nav_cmd: str,
+        num_inference_groups: int = 0,
     ) -> dict:
         if self._proc is None or self._proc.poll() is not None:
             raise RuntimeError("[AlpamayoSubprocessClient] Server process is not running.")
@@ -169,6 +171,8 @@ class AlpamayoSubprocessClient:
                 "ego_rot_npy": str(ego_rot_npy),
                 "nav_cmd": nav_cmd,
             }
+            if num_inference_groups > 0:
+                req["num_inference_groups"] = num_inference_groups
             self._proc.stdin.write(json.dumps(req) + "\n")
             self._proc.stdin.flush()
 
@@ -203,8 +207,12 @@ class AlpamayoR1Adapter(BaseModelAdapter):
     BridgeSim adapter for Alpamayo-R1, using a persistent Alpamayo venv subprocess.
     """
 
-    def __init__(self, checkpoint_path: str, config_path: str = None, **kwargs):
+    def __init__(self, checkpoint_path: str, config_path: str = None,
+                 scorer=None, num_groups: int = 1, **kwargs):
         super().__init__(checkpoint_path, config_path=config_path, **kwargs)
+        self.scorer = scorer
+        self.num_groups = num_groups
+        self._current_frame_id = 0
 
         # Allow CLI overrides; fallback to envvar/repo defaults if empty
         alp_python = kwargs.get("alp_python") or _default_alpamayo_python()
@@ -445,9 +453,54 @@ class AlpamayoR1Adapter(BaseModelAdapter):
             "nav_cmd": nav_cmd,
         }
 
+    def forward_inference_scaling(self, model_input: Any, num_groups: int = 1) -> Dict[str, Any]:
+        """
+        Generate num_groups * num_traj_samples trajectory candidates and return
+        all of them for external scorer selection.
+
+        Returns dict matching the BaseTrajectoryScorer interface:
+            - "all_candidates": torch.Tensor (1, N, 8, 3) — [fwd, lat, z] at 0.5s intervals
+            - "confidence_scores": None
+            - "scorer_context": {}
+        """
+        if self.client is None:
+            raise RuntimeError("AlpamayoR1Adapter: client is None. Did you call load_model()?")
+
+        result = self.client.infer(
+            image_stack_uint8_nhwc=model_input["img_stack"],
+            ego_xyz_world=model_input["ego_xyz_world"],
+            ego_rot_yaw=model_input["ego_yaw_world"],
+            nav_cmd=model_input.get("nav_cmd", "STRAIGHT"),
+            num_inference_groups=num_groups,
+        )
+
+        if "all_candidates" not in result:
+            raise RuntimeError(
+                "Server did not return all_candidates. "
+                "Ensure num_inference_groups was passed correctly."
+            )
+
+        # Convert (N, 8, 3) list → torch tensor (1, N, 8, 3)
+        candidates_np = np.array(result["all_candidates"], dtype=np.float32)
+        candidates_tensor = torch.from_numpy(candidates_np).unsqueeze(0)
+
+        # Full-resolution candidates (N, T, 3) for trajectory consumption after scoring
+        candidates_full_np = np.array(result["all_candidates_full"], dtype=np.float32)
+        candidates_full_tensor = torch.from_numpy(candidates_full_np).unsqueeze(0)
+
+        return {
+            "all_candidates": candidates_tensor,
+            "all_candidates_full": candidates_full_tensor,
+            "confidence_scores": None,
+            "scorer_context": {},
+        }
+
     def run_inference(self, model_input: Any) -> Any:
         if self.client is None:
             raise RuntimeError("AlpamayoR1Adapter: client is None. Did you call load_model()?")
+
+        if self.scorer is not None:
+            return self.forward_inference_scaling(model_input, num_groups=self.num_groups)
 
         return self.client.infer(
             image_stack_uint8_nhwc=model_input["img_stack"],
@@ -457,6 +510,34 @@ class AlpamayoR1Adapter(BaseModelAdapter):
         )
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        # Scorer path: model_output is the dict from forward_inference_scaling
+        if self.scorer is not None and "all_candidates" in model_output:
+            result = self.scorer.select_best(
+                model_output,
+                ego_state=ego_state,
+                frame_idx=self._current_frame_id,
+            )
+            best_idx = result["best_idx"][0].item()
+
+            # Use full-resolution trajectory if available, else fall back to scorer output
+            if "all_candidates_full" in model_output:
+                trajectory = model_output["all_candidates_full"][0, best_idx].cpu().numpy()  # (T, 3) [fwd,lat,z]
+            else:
+                trajectory = result["trajectory"][0].cpu().numpy()  # (8, 3) [fwd,lat,z]
+            traj_swapped = np.column_stack([trajectory[:, 1], trajectory[:, 0]])  # [lat, fwd]
+            parsed = {
+                "trajectory": traj_swapped,
+                "best_idx": best_idx,
+                "num_candidates": model_output["all_candidates"].shape[1],
+            }
+            # Store candidates for visualization (N, 8, 2) as [lat, fwd]
+            all_cands = model_output["all_candidates"][0].cpu().numpy()  # (N, 8, 3)
+            parsed["trajectory_coarse"] = np.stack([
+                np.column_stack([c[:, 1], c[:, 0]]) for c in all_cands
+            ])  # (N, 8, 2)
+            parsed["coarse_scores"] = result["scores"][0].cpu().numpy()  # (N,)
+            return parsed
+
         traj_list = model_output.get("trajectory_lateral_forward", None)
         if traj_list is None:
             return {"trajectory": np.zeros((10, 2), dtype=np.float32)}

@@ -81,6 +81,8 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                     self.scenario_dt = float(timestep.item())
                 elif timestep.size > 1:
                     self.scenario_dt = float(timestep.flat[0]) if timestep.flat[0] > 0 else 0.1
+            elif isinstance(timestep, (list, tuple)):
+                self.scenario_dt = float(timestep[0]) if len(timestep) > 0 else 0.1
             else:
                 self.scenario_dt = float(timestep)
         self.planner_dt = 0.5

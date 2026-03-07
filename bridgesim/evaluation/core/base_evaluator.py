@@ -1736,6 +1736,24 @@ class BaseEvaluator:
                         prediction_heading=pred_heading
                     )
 
+            # Render Alpamayo scorer candidate visualizations
+            if type(self.model_adapter).__name__ == 'AlpamayoR1Adapter' and self.cached_parsed_output is not None:
+                if hasattr(self.model_adapter, 'scorer') and self.model_adapter.scorer is not None:
+                    parsed = self.cached_parsed_output
+                    pred_pos = self.cached_prediction_position
+                    pred_heading = self.cached_prediction_heading
+
+                    if 'trajectory_coarse' in parsed:
+                        coarse_scores = parsed.get('coarse_scores', None)
+                        self.render_topdown_bev_candidates_coarse(
+                            env, frame_id, ego_state['position'], ego_state['heading'],
+                            trajectory_coarse_ego=parsed['trajectory_coarse'],
+                            coarse_scores=coarse_scores,
+                            planned_traj_world=world_traj,
+                            prediction_position=pred_pos,
+                            prediction_heading=pred_heading
+                        )
+
             # Render DiffusionDrive v1 scorer candidate visualizations
             if type(self.model_adapter).__name__ == 'DiffusionDriveAdapter' and self.cached_parsed_output is not None:
                 if hasattr(self.model_adapter, 'scorer') and self.model_adapter.scorer is not None:

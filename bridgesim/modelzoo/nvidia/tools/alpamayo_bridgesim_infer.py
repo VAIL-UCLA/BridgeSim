@@ -123,8 +123,31 @@ def inject_nav_command(messages, nav_cmd: str):
 # Single-frame inference
 # ---------------------------------------------------------------------------
 
+# Waypoint indices for subsampling 10Hz output to 8 waypoints at 0.5s intervals
+# Index i corresponds to t=(i+1)*0.1s, so index 4=0.5s, 9=1.0s, ..., 39=4.0s
+_PLANNER_WAYPOINT_INDICES = [4, 9, 14, 19, 24, 29, 34, 39]
+
+
+def _xyz_to_fwd_lat_z(all_xyz: np.ndarray, coord_mode: str) -> np.ndarray:
+    """Convert (N, T, 3) xyz array to (N, T, 3) [fwd, lat, z] for scorer convention."""
+    x, y, z = all_xyz[:, :, 0], all_xyz[:, :, 1], all_xyz[:, :, 2]
+    if coord_mode == "x_forward_y_left":
+        fwd, lat = x, y
+    elif coord_mode == "x_forward_y_right":
+        fwd, lat = x, -y
+    elif coord_mode == "x_right_y_forward":
+        fwd, lat = y, -x
+    elif coord_mode == "x_left_y_forward":
+        fwd, lat = y, x
+    else:
+        fwd, lat = x, y
+    return np.stack([fwd, lat, z], axis=-1)
+
+
 def run_one(model, processor, device, req: dict, args) -> dict:
     nav_cmd = req.get("nav_cmd", "STRAIGHT")
+    num_inference_groups = req.get("num_inference_groups", 1)
+    total_samples = args.num_traj_samples * num_inference_groups
 
     frames = load_frames_as_expected(req["image_npy"], target_n=16)
     messages = helper.create_message(frames)
@@ -150,7 +173,7 @@ def run_one(model, processor, device, req: dict, args) -> dict:
     }
     model_inputs = helper.to_device(model_inputs, device)
 
-    if device == "cuda":
+    if device == "cuda" and total_samples == 1:
         torch.cuda.manual_seed_all(42)
 
     with torch.no_grad():
@@ -159,16 +182,20 @@ def run_one(model, processor, device, req: dict, args) -> dict:
                 data=model_inputs,
                 top_p=args.top_p,
                 temperature=args.temperature,
-                num_traj_samples=args.num_traj_samples,
+                num_traj_samples=total_samples,
                 max_generation_length=args.max_generation_length,
                 return_extra=True,
             )
 
     xyz = pred_xyz.detach().float().cpu().numpy()
+    print(f"[ALPAMAYO DEBUG] pred_xyz shape: {xyz.shape}, total_samples={total_samples}", file=sys.stderr, flush=True)
     if xyz.ndim == 5:
-        traj_xyz = xyz[0, 0, 0]
+        all_xyz = xyz[0, 0]  # (N, T, 3)
     else:
-        traj_xyz = xyz.reshape(-1, xyz.shape[-1])
+        all_xyz = xyz.reshape(total_samples, -1, xyz.shape[-1])
+    print(f"[ALPAMAYO DEBUG] all_xyz shape: {all_xyz.shape}, unique rows: {len(set(tuple(all_xyz[i,4]) for i in range(len(all_xyz))))}", file=sys.stderr, flush=True)
+
+    traj_xyz = all_xyz[0]  # (T, 3) — first sample for single-traj output
 
     if traj_xyz.ndim != 2 or traj_xyz.shape[1] < 2:
         traj_lat_fwd = [[0.0, 0.0] for _ in range(10)]
@@ -196,7 +223,26 @@ def run_one(model, processor, device, req: dict, args) -> dict:
     except Exception:
         reasoning = None
 
-    return {"trajectory_lateral_forward": traj_lat_fwd, "reasoning": reasoning}
+    result = {"trajectory_lateral_forward": traj_lat_fwd, "reasoning": reasoning}
+
+    # Build all_candidates for inference scaling (always when num_inference_groups in req)
+    if "num_inference_groups" in req:
+        T = all_xyz.shape[1]
+        # Subtract per-sample origin so waypoints are ego-relative offsets
+        origins = all_xyz[:, 0:1, :]  # (N, 1, 3)
+        all_xyz_rel = all_xyz - origins  # (N, T, 3)
+        all_xyz_rel = _xyz_to_fwd_lat_z(all_xyz_rel, args.coord_mode)  # (N, T, 3) [fwd,lat,z]
+
+        # Coarse candidates at 0.5s intervals for scorer (N, 8, 3)
+        indices = [i for i in _PLANNER_WAYPOINT_INDICES if i < T]
+        while len(indices) < len(_PLANNER_WAYPOINT_INDICES):
+            indices.append(indices[-1])
+        result["all_candidates"] = all_xyz_rel[:, indices, :].tolist()  # (N, 8, 3)
+
+        # Full-resolution candidates at 10Hz for evaluator consumption after scorer picks best
+        result["all_candidates_full"] = all_xyz_rel.tolist()  # (N, T, 3)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

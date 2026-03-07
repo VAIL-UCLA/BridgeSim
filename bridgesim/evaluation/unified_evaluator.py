@@ -197,6 +197,8 @@ def create_model_adapter(args):
 
     elif model_type == "alpamayo_r1":
         from bridgesim.evaluation.models.alpamayo_r1_adapter import AlpamayoR1Adapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else (1 if scorer is None else 1)
         return AlpamayoR1Adapter(
             checkpoint_path=args.checkpoint,
             alp_python=args.alp_python,
@@ -206,6 +208,8 @@ def create_model_adapter(args):
             temperature=args.alp_temperature,
             num_traj_samples=args.alp_num_traj_samples,
             max_generation_length=args.alp_max_generation_length,
+            scorer=scorer,
+            num_groups=num_groups,
         )
 
     else:
@@ -312,7 +316,7 @@ def main():
     )
     parser.add_argument("--alp-top-p", type=float, default=0.98)
     parser.add_argument("--alp-temperature", type=float, default=0.6)
-    parser.add_argument("--alp-num-traj-samples", type=int, default=1)
+    parser.add_argument("--alp-num-traj-samples", type=int, default=20)
     parser.add_argument("--alp-max-generation-length", type=int, default=256)
 
     # Temporal consistency parameters (for DiffusionDriveV2)
