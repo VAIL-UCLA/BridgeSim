@@ -7,10 +7,10 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 
 # Configuration - modify these paths as needed
-INPUT_DIR="${1:-}"
-OUTPUT_DIR="${2:-}"
-MAP_ROOT="${3:-}"
-SCENE_FILTER="${4:-}"  # Optional: path to scene filter YAML
+INPUT_DIR="${1:-/home/seth/note_workspace/BridgeSim/test_navsim_logs/test}"
+OUTPUT_DIR="${2:-/home/seth/note_workspace/BridgeSim/converted_scenarios/navhard}"
+MAP_ROOT="${3:-/home/seth/note_workspace/BridgeSim/maps}"
+SCENE_FILTER="${4:-/home/seth/note_workspace/BridgeSim/converters/openscene/filter/navhard_two_stage.yaml}"
 
 # Check required arguments
 if [ -z "$INPUT_DIR" ] || [ -z "$OUTPUT_DIR" ] || [ -z "$MAP_ROOT" ]; then
@@ -33,18 +33,13 @@ echo "Maps:   $MAP_ROOT"
 echo "============================================================"
 
 # Build command
-if [ -n "$SCENE_FILTER" ]; then
-    python "${REPO_ROOT}/converters/openscene/convert_openscene_with_filter.py" \
-        --scene-filter "$SCENE_FILTER" \
-        --input-dir "$INPUT_DIR" \
-        --output-dir "$OUTPUT_DIR" \
-        --map-root "$MAP_ROOT" \
-        --num-future-frames-extract 220 \
-        --interpolate
-else
-    python "${REPO_ROOT}/converters/openscene/convert_openscene.py" \
-        --input "$INPUT_DIR" \
-        --output-dir "$OUTPUT_DIR" \
-        --map_root "$MAP_ROOT" \
-        --interpolate
-fi
+CMD=(python "${REPO_ROOT}/converters/openscene/convert_openscene_with_filter.py"
+    --input-dir "$INPUT_DIR"
+    --output-dir "$OUTPUT_DIR"
+    --map-root "$MAP_ROOT"
+    --num-future-frames-extract 40
+    --interpolate)
+
+[ -n "$SCENE_FILTER" ] && CMD+=(--scene-filter "$SCENE_FILTER")
+
+"${CMD[@]}"

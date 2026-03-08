@@ -74,6 +74,7 @@ ckpts/BridgeSim/
 Convert driving scenarios to ScenarioNet format for evaluation in MetaDrive.
 
 ### OpenScene/NavSim Conversion
+We have included filter folder under openscene converter, in the main paper NavHard closed-loop evaluations used the following setting:
 
 ```bash
 # Convert OpenScene scenarios with scene filtering
@@ -82,7 +83,7 @@ python converters/openscene/convert_openscene_with_filter.py \
     --input-dir /path/to/navsim_logs \
     --output-dir /path/to/output \
     --map-root /path/to/maps \
-    --num-future-frames-extract 220 \
+    --num-future-frames-extract 40 \ #future 20 seconds since navsim sampling is 2hz
     --interpolate
 ```
 
