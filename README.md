@@ -1,8 +1,8 @@
 # BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving
+[![website](https://img.shields.io/badge/Website-Explore%20Now-blueviolet?style=flat&logo=google-chrome)](https://vail-ucla.github.io/BridgeSim/)
+<!-- [![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](http://arxiv.org/abs/2509.03704) -->
 
-Closed-loop cross-simulator evaluation platform based on MetaDrive simulator for end-to-end autonomous driving.
-
-This repository contains tools for deploying, evaluating, and converting scenarios for E2E driving models from Bench2Drive and NavSim families.
+This is the official implementation of "BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving". This repository contains tools for deploying, evaluating, and converting scenarios for E2E driving models from Bench2Drive and NavSim families.
 
 ## Table of Contents
 
