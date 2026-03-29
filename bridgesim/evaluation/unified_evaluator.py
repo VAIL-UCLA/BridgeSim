@@ -56,6 +56,41 @@ def create_trajectory_scorer(args):
         print("Creating EPDMSEgoScorer (will be initialized after env setup)")
         return EPDMSEgoScorer()
 
+    elif scorer_name == "epdms_ego_v1":
+        from bridgesim.evaluation.scorers import EPDMSEgoScorerV1
+        print("Creating EPDMSEgoScorerV1 with plan continuity (will be initialized after env setup)")
+        return EPDMSEgoScorerV1()
+
+    elif scorer_name == "epdms_ego_ttc":
+        from bridgesim.evaluation.scorers import EPDMSEgoTTCScorer
+        print("Creating EPDMSEgoTTCScorer (will be initialized after env setup)")
+        return EPDMSEgoTTCScorer()
+
+    elif scorer_name == "epdms_ego_adaptive_col":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_scorer import EPDMSEgoAdaptiveColScorer
+        print("Creating EPDMSEgoAdaptiveColScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveColScorer()
+
+    elif scorer_name == "epdms_ego_ttc_softcol":
+        from bridgesim.evaluation.scorers import EPDMSEgoTTCSoftColScorer
+        print("Creating EPDMSEgoTTCSoftColScorer (will be initialized after env setup)")
+        return EPDMSEgoTTCSoftColScorer()
+
+    elif scorer_name == "epdms_ego_ttc_softcol_softdac":
+        from bridgesim.evaluation.scorers import EPDMSEgoTTCSoftColSoftDACScorer
+        print("Creating EPDMSEgoTTCSoftColSoftDACScorer (will be initialized after env setup)")
+        return EPDMSEgoTTCSoftColSoftDACScorer()
+
+    elif scorer_name == "epdms_ego_ttc_2":
+        from bridgesim.evaluation.scorers import EPDMSEgoTTC2Scorer
+        print("Creating EPDMSEgoTTC2Scorer (will be initialized after env setup)")
+        return EPDMSEgoTTC2Scorer()
+
+    elif scorer_name == "epdms_ego_ttc_3":
+        from bridgesim.evaluation.scorers import EPDMSEgoTTC3Scorer
+        print("Creating EPDMSEgoTTC3Scorer (will be initialized after env setup)")
+        return EPDMSEgoTTC3Scorer()
+
     else:
         raise ValueError(f"Unknown trajectory scorer: {scorer_name}")
 
@@ -272,7 +307,7 @@ def main():
         "--trajectory-scorer",
         type=str,
         default=None,
-        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego"],
+        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego", "epdms_ego_v1", "epdms_ego_ttc", "epdms_ego_adaptive_col", "epdms_ego_ttc_softcol", "epdms_ego_ttc_softcol_softdac", "epdms_ego_ttc_2", "epdms_ego_ttc_3"],
         help="Trajectory scorer for inference scaling (for DiffusionDrive/V2). "
              "'confidence' uses poses_cls (v1 only). "
              "'coarse_topk' uses v2 learned coarse scorer (v1 needs --v2-scorer-checkpoint). "

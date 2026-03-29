@@ -5,6 +5,7 @@ from shapely.geometry import Polygon, Point
 from shapely import affinity
 from typing import Dict, List, Optional, Tuple
 from scipy.signal import savgol_filter
+from bridgesim.evaluation.utils.collision_classifier import is_agent_ahead, is_agent_behind
 
 # --- Constants ---
 VEHICLE_LENGTH = 4.515
@@ -532,6 +533,7 @@ class EPDMSScorer:
                 'heading': obj.heading_theta,
                 'length': length,
                 'width': width,
+                'velocity': np.array(obj.velocity[:2]),  # [vx, vy]
             })
 
         return agents
@@ -568,30 +570,23 @@ class EPDMSScorer:
 
         return 1.0 if corners_valid >= 4 else 0.0
 
-    def _check_nc_ttc_live(self, ego_pos: np.ndarray, ego_heading: float,
-                           ego_speed: float, current_agents: List[dict]) -> Tuple[float, float]:
+    def _check_nc_live(self, ego_pos: np.ndarray, ego_heading: float,
+                       ego_speed: float, current_agents: List[dict]) -> float:
         """
-        Check No Collision and Time to Collision using current simulation state.
-        Only checks current frame (t=0), not future predictions.
-
-        Returns (nc, ttc) tuple.
+        Check No Collision using current simulation state.
+        Returns 1.0 if no at-fault collision, 0.0 otherwise.
         """
-        nc, ttc = 1.0, 1.0
-
         ego_poly = self._get_ego_polygon(ego_pos[0], ego_pos[1], ego_heading)
 
         for agent in current_agents:
             agent_poly = self._get_agent_polygon(agent)
 
             if ego_poly.intersects(agent_poly):
-                # At-fault logic (same as original)
                 is_at_fault = True
 
-                # If ego is stopped, not at fault
                 if ego_speed < STOPPED_SPEED_THRESHOLD:
                     is_at_fault = False
 
-                # If agent is behind ego, not at fault (rear-ended)
                 dx = agent['position'][0] - ego_pos[0]
                 dy = agent['position'][1] - ego_pos[1]
                 ego_hx = np.cos(ego_heading)
@@ -601,11 +596,85 @@ class EPDMSScorer:
                     is_at_fault = False
 
                 if is_at_fault:
-                    nc = 0.0
-                    ttc = 0.0  # Collision at current frame means TTC = 0
-                    break
+                    return 0.0
 
-        return nc, ttc
+        return 1.0
+
+    def _check_ttc_live(self, ego_pos: np.ndarray, ego_heading: float,
+                        ego_speed: float, ego_velocity: np.ndarray,
+                        current_agents: List[dict]) -> float:
+        """
+        Check Time to Collision by projecting ego and agents forward at
+        constant velocity for TTC_HORIZON (1s), following NAVSIM style.
+
+        At-fault logic aligned with NAVSIM:
+        - Agent ahead of ego → at-fault
+        - Ego in multiple lanes or non-drivable area, and agent not behind → at-fault
+        - Otherwise → not at-fault, skip
+
+        Returns 1.0 if no predicted at-fault collision, 0.0 otherwise.
+        """
+        n_steps = 5
+        step_dt = TTC_HORIZON / n_steps
+
+        # Check if ego is currently in multiple lanes or non-drivable area
+        ego_in_wrong_area = self._check_ego_in_wrong_area(ego_pos, ego_heading)
+
+        for i in range(1, n_steps + 1):
+            t = i * step_dt
+            future_ego_pos = ego_pos + ego_velocity * t
+
+            for agent in current_agents:
+                agent_vel = agent['velocity']
+                future_agent_pos = agent['position'] + agent_vel * t
+
+                future_ego_poly = self._get_ego_polygon(
+                    future_ego_pos[0], future_ego_pos[1], ego_heading)
+                future_agent = {**agent, 'position': future_agent_pos}
+                future_agent_poly = self._get_agent_polygon(future_agent)
+
+                if not future_ego_poly.intersects(future_agent_poly):
+                    continue
+
+                # Ego stopped → not at-fault
+                if ego_speed < STOPPED_SPEED_THRESHOLD:
+                    continue
+
+                # NAVSIM at-fault logic
+                agent_ahead = is_agent_ahead(future_ego_pos, ego_heading, future_agent_pos)
+                agent_behind = is_agent_behind(future_ego_pos, ego_heading, future_agent_pos)
+
+                if agent_ahead or (ego_in_wrong_area and not agent_behind):
+                    return 0.0
+
+        return 1.0
+
+    def _check_ego_in_wrong_area(self, ego_pos: np.ndarray, ego_heading: float) -> bool:
+        """Check if ego is in multiple lanes or non-drivable area."""
+        nearby = self._query_nearby_lanes(ego_pos[0], ego_pos[1], radius=15.0)
+        ego_poly = self._get_ego_polygon(ego_pos[0], ego_pos[1], ego_heading)
+
+        # Check drivable area (any corner outside)
+        corners = [Point(c) for c in ego_poly.exterior.coords[:-1]]
+        corners_in_lane = 0
+        for corner in corners:
+            for lane in nearby:
+                if lane.shapely_polygon.contains(corner):
+                    corners_in_lane += 1
+                    break
+        if corners_in_lane < 4:
+            return True
+
+        # Check multiple lanes (ego center in more than one lane)
+        center = Point(ego_pos[0], ego_pos[1])
+        lanes_containing_center = 0
+        for lane in nearby:
+            if lane.shapely_polygon.contains(center):
+                lanes_containing_center += 1
+        if lanes_containing_center > 1:
+            return True
+
+        return False
 
     def _check_ddc_live(self, ego_pos: np.ndarray, ego_heading: float, ego_speed: float) -> float:
         """
@@ -781,8 +850,10 @@ class EPDMSScorer:
         current_agents = self._get_current_agents_from_sim()
 
         # 3. Compute all metrics using live state
-        # NC & TTC: Collision check with current agents
-        nc, ttc = self._check_nc_ttc_live(ego_pos, ego_heading, ego_speed, current_agents)
+        # NC: current-frame collision check
+        nc = self._check_nc_live(ego_pos, ego_heading, ego_speed, current_agents)
+        # TTC: constant-velocity forward projection (if already at-fault colliding, TTC is also 0)
+        ttc = self._check_ttc_live(ego_pos, ego_heading, ego_speed, ego_velocity, current_agents) if nc > 0 else 0.0
 
         # DAC: Drivable area compliance
         dac = self._check_dac_live(ego_pos, ego_heading)
