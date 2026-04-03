@@ -87,7 +87,8 @@ class TransfuserModel(nn.Module):
             d_model=config.tf_d_model,
         )
 
-    def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, features: Dict[str, torch.Tensor],
+                use_bev_calibrator: bool = False) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
 
         camera_feature: torch.Tensor = features["camera_feature"]
@@ -99,7 +100,13 @@ class TransfuserModel(nn.Module):
 
         batch_size = status_feature.shape[0]
 
-        bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
+        if use_bev_calibrator and hasattr(self, 'bev_calibrator') and self.bev_calibrator is not None:
+            _, bev_feature_raw, _ = self._backbone(camera_feature, lidar_feature)
+            bev_feature_raw = self.bev_calibrator.calibrate(bev_feature_raw)
+            bev_feature_upscale = self._backbone.top_down(bev_feature_raw)
+            bev_feature = bev_feature_raw
+        else:
+            bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
 
         bev_feature = self._bev_downscale(bev_feature).flatten(-2, -1)
         bev_feature = bev_feature.permute(0, 2, 1)

@@ -10,20 +10,11 @@ Reference files:
 - /calibration/train_uniad_bev.py:L715 - occupancy/detection heads
 """
 
-import sys
 import torch
 from pathlib import Path
 from typing import Optional
 
-# Add calibration directory to path (evaluation/ is at top level, calibration/ is sibling)
-CALIBRATION_DIR = Path(__file__).resolve().parent.parent.parent / "calibration"
-if str(CALIBRATION_DIR) not in sys.path:
-    sys.path.insert(0, str(CALIBRATION_DIR))
-
-try:
-    from train_bev_flow_pl import FlowMatchingLit
-except ImportError as e:
-    raise ImportError(f"Cannot import FlowMatchingLit. Make sure calibration directory exists at {CALIBRATION_DIR}") from e
+from bridgesim.calibration.bev_flow_lit import FlowMatchingLit
 
 
 class BEVCalibrator:

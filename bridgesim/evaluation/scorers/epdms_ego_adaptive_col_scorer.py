@@ -17,20 +17,25 @@ Key features:
 Scoring formula:
   (COL × DAC × DDC × TLC) × (5×EP + 2×LK + 2×HC + 2×EC) / 11
 
-COL is a discounted per-timestep collision score:
+COL is a discounted per-timestep TTC-based collision score:
   Σ γ^(t·dt) · score_t / Σ γ^(t·dt)
-  where score_t = 1.0 (no collision), 0.5 (not-at-fault), 0.0 (at-fault)
+  TTC computed via 2D bounding-box method (Jiao 2022): geometry-aware,
+  accounts for vehicle shape, orientation, and heading-dependent footprint.
+  score_t mapped linearly: TTC<=0.5s→0.0, TTC>=3.0s→1.0
+  with at-fault logic: not-at-fault→min(score, 0.5)
 """
 
 import math
 import time
 import numpy as np
+import pandas as pd
 import torch
 from typing import Dict, Any, Optional, List
 from shapely.geometry import Polygon, Point
 from scipy.signal import savgol_filter
 
 from bridgesim.evaluation.scorers.base_scorer import BaseTrajectoryScorer
+from bridgesim.evaluation.utils.ttc_2d import compute_ttc_2d
 
 # --- Constants ---
 VEHICLE_LENGTH = 4.515
@@ -56,6 +61,8 @@ LANE_KEEPING_WINDOW = 2.0
 STOPPED_SPEED_THRESHOLD = 5e-2
 MAX_ACCEL, MAX_JERK, MAX_YAW_RATE = 4.89, 8.37, 0.95
 EC_ACCEL_THRESH, EC_YAW_RATE_THRESH = 0.7, 0.1
+TTC_SAFE_THRESHOLD = 3.0    # TTC above this -> score 1.0
+TTC_DANGER_THRESHOLD = 0.5  # TTC below this -> score 0.0
 
 
 class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
@@ -204,14 +211,6 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
             return min(candidates, key=lambda c: c[1])[0]
         return None
 
-    def _get_ego_aabb(self, x: float, y: float) -> tuple:
-        return (x - VEHICLE_HALF_DIAG, y - VEHICLE_HALF_DIAG,
-                x + VEHICLE_HALF_DIAG, y + VEHICLE_HALF_DIAG)
-
-    @staticmethod
-    def _aabb_overlap(a, b) -> bool:
-        return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
-
     # ---------------------------------------------------------------
     # Pre-computation
     # ---------------------------------------------------------------
@@ -231,23 +230,43 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
             red_lanes_per_t.append(red_ids)
         return red_lanes_per_t
 
-    def _precompute_agent_futures_linear(self, frame_idx: int, horizon: int):
-        """Pre-compute per-timestep agent polygons via linear extrapolation."""
+    def _precompute_agent_futures_linear(self, frame_idx: int, horizon: int, max_agents: int = 10):
+        """Pre-compute per-timestep agent polygons via linear extrapolation.
+
+        Only the closest `max_agents` agents (by distance to ego) are kept.
+        """
         tracks = self.scenario_data['tracks']
         agents_per_t = [[] for _ in range(horizon)]
 
+        # Get ego position for distance filtering
+        sdc_track = tracks[self.sdc_id]
+        ego_pos = sdc_track['state']['position'][frame_idx][:2]
+
+        # First pass: collect valid agents with their distance to ego
+        agent_entries = []  # (distance, obj_id)
         for obj_id, track in tracks.items():
             if obj_id == self.sdc_id:
                 continue
             if track['type'] not in ['VEHICLE', 'CYCLIST']:
                 continue
+            pos_arr = track['state']['position']
+            valid_arr = track['state']['valid']
+            if frame_idx >= len(pos_arr) or not valid_arr[frame_idx]:
+                continue
+            pos = pos_arr[frame_idx][:2]
+            dist = float(np.sum((pos - ego_pos) ** 2))
+            agent_entries.append((dist, obj_id))
+
+        # Keep only the closest max_agents
+        agent_entries.sort(key=lambda x: x[0])
+        selected_ids = {obj_id for _, obj_id in agent_entries[:max_agents]}
+
+        for obj_id in selected_ids:
+            track = tracks[obj_id]
 
             pos_arr = track['state']['position']
             valid_arr = track['state']['valid']
             heading_arr = track['state']['heading']
-
-            if frame_idx >= len(pos_arr) or not valid_arr[frame_idx]:
-                continue
 
             pos = pos_arr[frame_idx][:2]
             heading = float(heading_arr[frame_idx])
@@ -261,6 +280,19 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
             else:
                 velocity = np.zeros(2)
 
+            # Compute acceleration
+            if 'velocity' in track['state'] and frame_idx > 0 and frame_idx < len(track['state']['velocity']) and valid_arr[frame_idx - 1]:
+                prev_velocity = track['state']['velocity'][frame_idx - 1][:2].copy()
+                acceleration = (velocity - prev_velocity) / self.scenario_dt
+            elif frame_idx > 1 and valid_arr[frame_idx - 1] and valid_arr[frame_idx - 2]:
+                prev_pos = pos_arr[frame_idx - 1][:2]
+                prev_prev_pos = pos_arr[frame_idx - 2][:2]
+                prev_velocity = (prev_pos - prev_prev_pos) / self.scenario_dt
+                curr_velocity = (pos - prev_pos) / self.scenario_dt
+                acceleration = (curr_velocity - prev_velocity) / self.scenario_dt
+            else:
+                acceleration = np.zeros(2)
+
             # Compute heading rate
             if frame_idx > 0 and valid_arr[frame_idx - 1]:
                 prev_heading = float(heading_arr[frame_idx - 1])
@@ -268,16 +300,17 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
             else:
                 heading_rate = 0.0
 
+            agent_vel_sim = velocity.copy()
+            agent_accel_sim = acceleration.copy()
+
             # Extrapolate for each horizon timestep
             for t in range(horizon):
                 dt_future = t * self.planner_dt
-                future_pos = pos + velocity * dt_future
+                future_pos = pos + velocity * dt_future + 0.5 * acceleration * dt_future ** 2
                 future_heading = heading + heading_rate * dt_future
 
                 ax, ay = future_pos + self.world_to_sim_offset
-                poly = self._get_ego_polygon(float(ax), float(ay), future_heading)
-                aabb = poly.bounds
-                agents_per_t[t].append((poly, aabb, float(ax), float(ay)))
+                agents_per_t[t].append((float(ax), float(ay), agent_vel_sim, agent_accel_sim, float(future_heading)))
 
         return agents_per_t
 
@@ -348,9 +381,6 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
 
         ego_polys = [self._get_ego_polygon(states['x'][t], states['y'][t], states['heading'][t])
                      for t in range(horizon)]
-        ego_aabbs = [self._get_ego_aabb(states['x'][t], states['y'][t])
-                     for t in range(horizon)]
-
         nearby_cache = {}
 
         def get_nearby(t, radius):
@@ -376,30 +406,63 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
                 dac_valid += 1
         metrics['dac'] = dac_valid / horizon if horizon > 0 else 1.0
 
-        # 2. COL (discounted per-timestep collision score)
+        # 2. COL (discounted per-timestep TTC-based collision score, γ^(t*dt) weighting)
+        #    Uses 2D bounding-box TTC (Jiao 2022) for geometry-aware collision detection.
+        #    Per-timestep score mapped linearly: TTC<=0.5s→0.0, TTC>=3.0s→1.0
         if agents_per_t is not None:
+            n_agents_total = sum(len(agents_per_t[t]) for t in range(min(horizon, len(agents_per_t))))
             col_num, col_den = 0.0, 0.0
+            ttc_range = TTC_SAFE_THRESHOLD - TTC_DANGER_THRESHOLD
             for t in range(horizon):
                 w = self.gamma ** (t * self.planner_dt)
-                step_score = 1.0
+                step_score = 1.0  # safe
                 ego_v = states['speed'][t]
-                ego_aabb = ego_aabbs[t]
-                for agent_poly, agent_aabb, ax, ay in agents_per_t[t]:
-                    if not self._aabb_overlap(ego_aabb, agent_aabb):
-                        continue
-                    if ego_polys[t].intersects(agent_poly):
-                        at_fault = True
-                        if ego_v < STOPPED_SPEED_THRESHOLD:
-                            at_fault = False
-                        dx, dy = ax - states['x'][t], ay - states['y'][t]
-                        ego_hx = math.cos(states['heading'][t])
-                        ego_hy = math.sin(states['heading'][t])
-                        longitudinal_dist = dx * ego_hx + dy * ego_hy
-                        if longitudinal_dist < -1.0:
-                            at_fault = False
-                        step_score = 0.0 if at_fault else min(step_score, 0.5)
-                        if at_fault:
-                            break
+                ego_hx = math.cos(states['heading'][t])
+                ego_hy = math.sin(states['heading'][t])
+                ego_vel = np.array([ego_hx * ego_v, ego_hy * ego_v])
+
+                nearby_rows = []
+                nearby_agents = []
+                for ax, ay, agent_vel, agent_accel, agent_heading in agents_per_t[t]:
+                    nearby_rows.append({
+                        'x_i': states['x'][t], 'y_i': states['y'][t],
+                        'vx_i': float(ego_vel[0]), 'vy_i': float(ego_vel[1]),
+                        'hx_i': ego_hx, 'hy_i': ego_hy,
+                        'length_i': VEHICLE_LENGTH, 'width_i': VEHICLE_WIDTH,
+                        'x_j': ax, 'y_j': ay,
+                        'vx_j': float(agent_vel[0]), 'vy_j': float(agent_vel[1]),
+                        'hx_j': math.cos(agent_heading), 'hy_j': math.sin(agent_heading),
+                        'length_j': VEHICLE_LENGTH, 'width_j': VEHICLE_WIDTH,
+                    })
+                    nearby_agents.append((ax, ay))
+
+                if nearby_rows:
+                    df = pd.DataFrame(nearby_rows)
+                    ttc_values = compute_ttc_2d(df, 'values')
+                    for idx, (ax, ay) in enumerate(nearby_agents):
+                        ttc = float(ttc_values[idx])
+                        if ttc >= TTC_SAFE_THRESHOLD:
+                            ttc_score = 1.0
+                        elif ttc <= TTC_DANGER_THRESHOLD:
+                            ttc_score = 0.0
+                        else:
+                            ttc_score = (ttc - TTC_DANGER_THRESHOLD) / ttc_range
+
+                        if ttc_score < step_score:
+                            at_fault = True
+                            if ego_v < STOPPED_SPEED_THRESHOLD:
+                                at_fault = False
+                            dx, dy = ax - states['x'][t], ay - states['y'][t]
+                            longitudinal_dist = dx * ego_hx + dy * ego_hy
+                            if longitudinal_dist < -1.0:
+                                at_fault = False
+
+                            if at_fault:
+                                step_score = min(step_score, ttc_score)
+                            else:
+                                step_score = min(step_score, max(ttc_score, 0.5))
+
+
                 col_den += w
                 col_num += w * step_score
             metrics['col'] = col_num / col_den if col_den > 0 else 1.0
@@ -490,7 +553,7 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
         # 8. Progress
         dist = math.sqrt((states['x'][-1] - states['x'][0]) ** 2 +
                          (states['y'][-1] - states['y'][0]) ** 2)
-        metrics['ep'] = min(dist / 30.0, 1.0)
+        metrics['ep'] = min(dist / 3.0, 1.0)
 
         return metrics
 
@@ -668,6 +731,7 @@ class EPDMSEgoAdaptiveColScorer(BaseTrajectoryScorer):
         # --- Pre-compute shared data ---
         red_lanes_per_t = self._precompute_red_lanes(frame_idx, horizon)
         agents_per_t = self._precompute_agent_futures_linear(frame_idx, horizon)
+        n_agents_check = sum(len(agents_per_t[t]) for t in range(horizon))
 
         # --- Transform new candidates to world frame ---
         candidates_world = self._ego_to_world(candidates_np, ego_state)  # (N, 8, 2)

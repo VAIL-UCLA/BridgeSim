@@ -1,1 +1,1 @@
-"""Feature modules (e.g., flow matching, post-processing)."""
+"""Feature modules."""

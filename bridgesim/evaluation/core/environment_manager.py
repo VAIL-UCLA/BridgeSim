@@ -28,18 +28,16 @@ class EnvironmentManager:
         agent_policy: Policy class for the ego agent (default: EnvInputPolicy)
     """
 
-    def __init__(self, scenario_path, traffic_mode="log_replay", render=False, image_on_cuda=True, agent_policy=EnvInputPolicy, camera_resolution=None):
+    def __init__(self, scenario_path, traffic_mode="log_replay", render=False, image_on_cuda=True, agent_policy=EnvInputPolicy):
         self.scenario_path = Path(scenario_path)
         self.traffic_mode = traffic_mode
         self.render = render
         self.image_on_cuda = image_on_cuda
         self.agent_policy = agent_policy
-        self.camera_resolution = camera_resolution or (1600, 900)
         self.env = None
 
     def create_env(self):
         """Create and return a MetaDrive ScenarioEnv with the configured traffic mode."""
-        cam_w, cam_h = self.camera_resolution
         config = {
             "use_render": False,  # Always use offscreen rendering (env.render with window=False)
             "image_on_cuda": self.image_on_cuda,
@@ -54,7 +52,7 @@ class EnvironmentManager:
 
             # Camera sensor configuration
             "sensors": {
-                "rgb_camera": (RGBCamera, cam_w, cam_h),
+                "rgb_camera": (RGBCamera, 900, 900),
             },
             "image_observation": True,
 

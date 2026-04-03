@@ -81,24 +81,10 @@ NAVSIMV2_MODELS = {
         "config": None,
         "description": "EgoStatusMLP blind baseline (no sensors, only ego state) trained on NavSim v2",
     },
-    "alpamayo_r1": {
-        "checkpoint": "nvidia/Alpamayo-R1-10B",
-        "config": None,
-        "description": "Alpamayo-R1 VLA model"
-    }
-}
-
-# Other models
-COMMAAI_MODELS = {
-    "openpilot": {
-        "checkpoint": os.path.join(CKPT_BASE, "commaai/openpilot"),
-        "config": None,
-        "description": "OpenPilot model trained by CommaAI",
-    },
 }
 
 # Combined model configurations
-MODEL_CONFIGS = {**BENCH2DRIVE_MODELS, **NAVSIMV2_MODELS, **COMMAAI_MODELS}
+MODEL_CONFIGS = {**BENCH2DRIVE_MODELS, **NAVSIMV2_MODELS}
 
 
 def get_checkpoint_path(model_type: str) -> str:
@@ -190,14 +176,6 @@ def print_model_summary():
 
     print("\n--- NavSim v2 Models (navsimv2/) ---")
     for name, config in NAVSIMV2_MODELS.items():
-        print(f"  {name}:")
-        print(f"    Checkpoint: {config['checkpoint']}")
-        if config['config']:
-            print(f"    Config: {config['config']}")
-        print(f"    Description: {config['description']}")
-
-    print("\n--- CommaAI Models (commaai/) ---")
-    for name, config in COMMAAI_MODELS.items():
         print(f"  {name}:")
         print(f"    Checkpoint: {config['checkpoint']}")
         if config['config']:

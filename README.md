@@ -1,62 +1,109 @@
-# BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving
-[![website](https://img.shields.io/badge/Website-Explore%20Now-blueviolet?style=flat&logo=google-chrome)](https://vail-ucla.github.io/BridgeSim/)
-<!-- [![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](http://arxiv.org/abs/2509.03704) -->
+# BridgeSim: Closed-Loop Evaluation for End-to-End Autonomous Driving
 
-This is the official implementation of "BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving". This repository contains tools for deploying, evaluating, and converting scenarios for E2E driving models from Bench2Drive and NavSim families.
+BridgeSim is a closed-loop cross-dataset evaluation platform for end-to-end autonomous driving models, built on the [MetaDrive](https://github.com/metadriverse/metadrive) simulator. It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more).
 
 ## Table of Contents
 
 - [Installation](#installation)
+- [Checkpoints](#checkpoints)
 - [Scenario Conversion](#scenario-conversion)
 - [Evaluation](#evaluation)
 - [Supported Models](#supported-models)
+- [References](#references)
+
+---
 
 ## Installation
 
-### 1. Clone the Repository and Install MetaDrive
+### 1. Base Docker Image
+
+All model environments are tested against:
+
+```bash
+docker pull robinwangucsd/metabench:latest
+```
+
+### 2. Clone Repository
 
 ```bash
 git clone https://github.com/VAIL-UCLA/BridgeSim.git
 cd BridgeSim
-
-# Install MetaDrive simulator
-cd metadrive
-pip install -e .
-cd ..
 ```
 
-### 2. Create Conda Environment
+### 3. Per-Model Environment Setup
+
+Each model group requires a different conda environment.
+
+| Model group | Conda env | Python |
+|---|---|---|
+| DiffusionDrive / DiffusionDriveV2 / LTF / TransFuser / DrivoR | `mdsn` | 3.9 |
+| UniAD / VAD | `b2d` | 3.8 |
+| RAP | `rap` | 3.9 |
+
+#### NavSim models (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR)
 
 ```bash
-# Create the mdsn environment (for most models)
-conda env create -f mdsn.yml
+conda env create -f mdsn.yaml
 conda activate mdsn
 
-# Install the bridgesim package
+pip install -e nuplan-devkit/
+pip install -e metadrive/.[cuda]
 pip install -e .
 ```
 
-### 3. Download Checkpoints
+> **Note (headless servers):** If you encounter OpenGL or `GLIBCXX_3.4.xx not found` errors, run:
+> ```bash
+> mkdir -p /usr/lib/dri
+> ln -s /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so /usr/lib/dri/swrast_dri.so
+> ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.30 $(conda info --base)/envs/mdsn/lib/libstdc++.so.6
+> ```
 
-Download model checkpoints from Hugging Face:
+#### Bench2Drive models (UniAD, VAD)
 
 ```bash
-# Install huggingface_hub if not already installed
-pip install huggingface_hub
+conda env create -f b2d.yaml
+conda activate b2d
 
-# Download the model zoo
+pip install -e nuplan-devkit/
+pip install -e metadrive/.[cuda]
+pip install -e bridgesim/modelzoo/bench2drive/ --no-build-isolation
+pip install -e .
+```
+
+> **Note (headless servers):** Same workarounds as above, replacing `mdsn` with `b2d` in the `ln -sf` path.
+
+#### RAP
+
+```bash
+conda env create -f rap.yml
+conda activate rap
+
+pip install -e metadrive/.[cuda]
+pip install -e navsim/
+pip install -e .
+```
+
+> **Note (headless servers):** Same workarounds as above, replacing `mdsn` with `rap` in the `ln -sf` path.
+
+---
+
+## Checkpoints
+
+Download all model checkpoints from HuggingFace:
+
+```bash
 huggingface-cli download sethzhao506ucla/BridgeSim --local-dir ckpts/BridgeSim
 ```
 
-Expected checkpoint structure in `ckpts/BridgeSim/`:
+Expected structure:
 
 ```
 ckpts/BridgeSim/
-├── bench2drive/          # Bench2Drive trained models
+├── bench2drive/
 │   ├── UniAD/
 │   ├── VAD/
 │   └── TCP/
-└── navsimv2/             # NavSim v2 trained models
+└── navsimv2/
     ├── DiffusionDrive/
     ├── DiffusionDriveV2/
     ├── DrivoR/
@@ -71,23 +118,20 @@ ckpts/BridgeSim/
 
 ## Scenario Conversion
 
-Convert driving scenarios to ScenarioNet format for evaluation in MetaDrive.
+Convert driving datasets to ScenarioNet format for MetaDrive evaluation.
 
-### OpenScene/NavSim Conversion
-We have included filter folder under openscene converter, in the main paper NavHard closed-loop evaluations used the following setting:
+### OpenScene / NavSim
 
 ```bash
-# Convert OpenScene scenarios with scene filtering
 python converters/openscene/convert_openscene_with_filter.py \
     --scene-filter /path/to/scene_filter.yaml \
     --input-dir /path/to/navsim_logs \
     --output-dir /path/to/output \
     --map-root /path/to/maps \
-    --num-future-frames-extract 40 \ #future 20 seconds since navsim sampling is 2hz
+    --num-future-frames-extract 220 \
     --interpolate
 ```
 
-**Options:**
 | Option | Description |
 |--------|-------------|
 | `--scene-filter` | YAML file specifying which scenes to convert |
@@ -97,7 +141,7 @@ python converters/openscene/convert_openscene_with_filter.py \
 | `--num-future-frames-extract` | Number of future frames to extract |
 | `--interpolate` | Interpolate from 2Hz to 10Hz |
 
-### Bench2Drive Conversion
+### Bench2Drive
 
 ```bash
 python converters/bench2drive/convert_bench2drive.py \
@@ -106,13 +150,9 @@ python converters/bench2drive/convert_bench2drive.py \
     --output-dir /path/to/output
 ```
 
-### nuScenes Conversion
+### nuScenes
 
 ```bash
-# Using shell script
-bash scripts/converter/convert_nuscenes.sh /path/to/nuScenes /path/to/output v1.0-mini 8
-
-# Or directly with Python
 python -m converters.nuscenes.convert_nuscenes \
     --dataroot /path/to/nuScenes \
     --database_path /path/to/output \
@@ -120,106 +160,89 @@ python -m converters.nuscenes.convert_nuscenes \
     --num_workers 8
 ```
 
-**nuScenes Options:**
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--split` | v1.0-mini | Dataset split (v1.0-mini, v1.0-trainval, v1.0-test) |
-| `--render` | - | Generate rendered images after conversion |
-| `--map_radius` | 500 | Map extraction radius |
-
-### Waymo Conversion
+### Waymo
 
 ```bash
-# Using shell script
-bash scripts/converter/convert_waymo.sh /path/to/waymo/tfrecords /path/to/output 8
-
-# Or directly with Python
 python -m converters.waymo.convert_waymo \
     --raw_data_path /path/to/waymo/tfrecords \
     --database_path /path/to/output \
     --num_workers 8
 ```
 
-**Waymo Options:**
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--version` | v1.2 | Waymo dataset version |
-| `--start_file_index` | 0 | Start index for file selection |
-| `--num_files` | None | Number of files to process (None = all) |
-
 ---
 
 ## Evaluation
 
-All evaluation scripts should be run from the repository root.
+Run evaluation with `unified_evaluator.py` from the repository root. For batch evaluation over many scenarios see `scripts/evaluator/run_batch_eval.sh`.
 
-### Single Scenario Evaluation
-
-```bash
-# Usage: bash scripts/evaluator/run_eval.sh [model_type] [scenario_path] [gpu_id]
-bash scripts/evaluator/run_eval.sh transfuser /path/to/scenario 0
-```
-
-### Batch Evaluation
+### NavSim models (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR)
 
 ```bash
-# Usage: bash scripts/evaluator/run_batch_eval.sh [model_type] [scenario_root] [options]
-bash scripts/evaluator/run_batch_eval.sh uniad /path/to/scenarios
-
-# Resume interrupted evaluation
-bash scripts/evaluator/run_batch_eval.sh uniad /path/to/scenarios --resume
+python -m bridgesim.evaluation.unified_evaluator \
+    --model-type diffusiondrive \
+    --checkpoint ckpts/BridgeSim/navsimv2/DiffusionDrive/diffusiondrive_navsim_88p1_PDMS \
+    --plan-anchor-path ckpts/BridgeSim/navsimv2/DiffusionDrive/kmeans_navsim_traj_20.npy \
+    --scenario-path /path/to/scenario \
+    --output-dir /path/to/output \
+    --replan-rate 10 \
+    --eval-frames 80
 ```
 
-**Batch Evaluation Options:**
+### Bench2Drive models (UniAD, VAD)
+
+```bash
+python -m bridgesim.evaluation.unified_evaluator \
+    --model-type uniad \
+    --checkpoint ckpts/BridgeSim/bench2drive/UniAD/uniad_base_b2d.pth \
+    --config bridgesim/modelzoo/bench2drive/adzoo/uniad/configs/stage2_e2e/base_e2e_b2d.py \
+    --scenario-path /path/to/scenario \
+    --output-dir /path/to/output \
+    --replan-rate 10 \
+    --eval-frames 80
+```
+
+### RAP
+
+```bash
+python -m bridgesim.evaluation.unified_evaluator \
+    --model-type rap \
+    --checkpoint ckpts/BridgeSim/navsimv2/RAP_DINO/RAP_DINO_navsimv2.ckpt \
+    --image-source rasterized_3d \
+    --scenario-path /path/to/scenario \
+    --output-dir /path/to/output \
+    --replan-rate 10 \
+    --eval-frames 80
+```
+
+### Key options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--resume` | - | Resume from previous run |
-| `--replan-rate N` | 10 | Replan rate (steps between replanning) |
-| `--sim-dt F` | 0.1 | Simulation timestep |
-| `--ego-replay-frames N` | 20 | Number of ego replay frames before control |
-| `--eval-frames N` | 200 | Number of frames to evaluate |
-| `--scorer-type TYPE` | navsim | Scorer type: `legacy` or `navsim` |
-| `--eval-mode MODE` | closed_loop | Evaluation mode: `closed_loop` or `open_loop` |
-| `--enable-vis` | - | Enable visualization outputs |
-
-### Output Structure
-
-```
-outputs/
-├── batch_results.json           # Per-scenario results (for resume)
-├── aggregated_results.json      # Aggregated statistics
-├── logs/
-│   └── <scenario>.log           # Individual scenario logs
-└── <scenario>/
-    └── evaluation_results.json  # Detailed results
-```
+| `--replan-rate` | 1 | Steps between model inference calls |
+| `--eval-frames` | full scenario | Number of frames to evaluate |
+| `--ego-replay-frames` | 0 | Frames to replay log ego before model takes over |
+| `--traffic-mode` | `log_replay` | `no_traffic`, `log_replay`, or `IDM` |
+| `--trajectory-scorer` | None | Inference-time trajectory scorer for DiffusionDrive/V2 |
+| `--eval-mode` | `closed_loop` | `closed_loop` or `open_loop` |
+| `--image-source` | `metadrive` | Image source for RAP: `metadrive`, `rasterized_3d` |
 
 ---
 
 ## Supported Models
 
-### Bench2Drive Models
-
-| Model | Adapter |
-|-------|---------|
-| `uniad` | `bridgesim/evaluation/models/uniad_vad_adapter.py` |
-| `vad` | `bridgesim/evaluation/models/uniad_vad_adapter.py` |
-| `tcp` | `bridgesim/evaluation/models/tcp_adapter.py` |
-
-### NavSim v2 Models
-
-| Model | Adapter |
-|-------|---------|
-| `transfuser` | `bridgesim/evaluation/models/transfuser_adapter.py` |
-| `ltf` | `bridgesim/evaluation/models/ltf_adapter.py` |
-| `diffusiondrive` | `bridgesim/evaluation/models/diffusiondrive_adapter.py` |
-| `diffusiondrivev2` | `bridgesim/evaluation/models/diffusiondrivev2_adapter.py` |
-| `drivor` | `bridgesim/evaluation/models/drivor_adapter.py` |
-| `rap` | `bridgesim/evaluation/models/rap_adapter.py` |
-| `lead_navsim` | `bridgesim/evaluation/models/lead_navsim_adapter.py` |
-| `ego_mlp` | `bridgesim/evaluation/models/ego_mlp_adapter.py` |
-| `alpamayo_r1` | `bridgesim/evaluation/models/alpamayo_r1_adapter.py` |
+| Model | Type | `--model-type` |
+|-------|------|----------------|
+| UniAD | Bench2Drive | `uniad` |
+| VAD | Bench2Drive | `vad` |
+| TCP | Bench2Drive | `tcp` |
+| TransFuser | NavSim v2 | `transfuser` |
+| Latent TransFuser | NavSim v2 | `ltf` |
+| DiffusionDrive | NavSim v2 | `diffusiondrive` |
+| DiffusionDriveV2 | NavSim v2 | `diffusiondrivev2` |
+| DrivoR | NavSim v2 | `drivor` |
+| RAP | NavSim v2 | `rap` |
+| LEAD (NavSim) | NavSim v2 | `lead_navsim` |
+| EgoMLP | NavSim v2 | `ego_mlp` |
 
 ---
 
@@ -229,3 +252,18 @@ outputs/
 - [UniAD](https://github.com/OpenDriveLab/UniAD)
 - [MetaDrive](https://github.com/metadriverse/metadrive)
 - [NavSim](https://github.com/autonomousvision/navsim)
+- [DiffusionDrive](https://github.com/hustvl/DiffusionDrive)
+- [ADV-BMT](https://github.com/Yuxin45/Adv-BMT)
+
+---
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
+
+Third-party components:
+- `metadrive/` — Apache 2.0 ([metadriverse/metadrive](https://github.com/metadriverse/metadrive))
+- `scenarionet/` — Apache 2.0 ([metadriverse/scenarionet](https://github.com/metadriverse/scenarionet))
+- `nuplan-devkit/` — Apache 2.0 ([motional/nuplan-devkit](https://github.com/motional/nuplan-devkit))
+- `ADV-BMT/` — see [Yuxin45/Adv-BMT](https://github.com/Yuxin45/Adv-BMT)
+- Model weights are subject to their respective original licenses

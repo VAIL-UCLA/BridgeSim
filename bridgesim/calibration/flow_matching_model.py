@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from dit import DiT_models
+from .dit import DiT_models
 
 
 class FlowMatchingModel(nn.Module):

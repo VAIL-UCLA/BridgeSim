@@ -1,28 +1,32 @@
 """
-Optimized EPDMS trajectory scorer for inference scaling.
+EPDMS Ego Scorer V1 — Trajectory selection with plan continuity.
 
-Key optimizations over epdms_trajectory_scorer.py:
-1. Pre-compute agent polygons and traffic light states per frame (shared across all candidates)
-2. Cache ego polygons and nearby lanes within each candidate evaluation
-3. AABB pre-filter before expensive Shapely intersection checks
-4. Vectorized trajectory state computation across all candidates
+Key differences from EPDMSEgoScorer (baseline):
+1. Caches the previous best trajectory for continuity.
+2. At each replan, scores new candidates (full horizon), picks the best new one,
+   then re-scores the previous trajectory's remaining segment at current replan time
+   before comparison.
+3. If the old trajectory doesn't have enough remaining waypoints to last until
+   the next replan (remaining < 2*K), forces switch to the best new trajectory.
+4. Otherwise, keeps the old trajectory if its re-scored remaining reward >= new best score.
+
+Scoring formula (same as EPDMSEgoScorer):
+  (DAC x DDC x TLC) x (5*EP + 2*LK + 2*HC + 2*EC) / 11
 """
 
 import math
 import time
 import numpy as np
 import torch
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 from shapely.geometry import Polygon, Point
-from shapely import affinity
 from scipy.signal import savgol_filter
 
 from bridgesim.evaluation.scorers.base_scorer import BaseTrajectoryScorer
 
-# --- Constants ---
+# --- Constants (same as epdms_ego_scorer) ---
 VEHICLE_LENGTH = 4.515
 VEHICLE_WIDTH = 1.852
-VEHICLE_HALF_DIAG = math.sqrt((VEHICLE_LENGTH / 2) ** 2 + (VEHICLE_WIDTH / 2) ** 2)
 
 VEHICLE_POLYGON_COORDS = np.array([
     [VEHICLE_LENGTH / 2, VEHICLE_WIDTH / 2],
@@ -31,23 +35,27 @@ VEHICLE_POLYGON_COORDS = np.array([
     [-VEHICLE_LENGTH / 2, VEHICLE_WIDTH / 2]
 ])
 
-W_PROGRESS, W_TTC, W_LANE_KEEPING, W_HISTORY_COMFORT, W_EXTENDED_COMFORT = 5.0, 5.0, 2.0, 2.0, 2.0
-W_TOTAL = W_PROGRESS + W_TTC + W_LANE_KEEPING + W_HISTORY_COMFORT + W_EXTENDED_COMFORT
+W_PROGRESS = 5.0
+W_LANE_KEEPING = 2.0
+W_HISTORY_COMFORT = 2.0
+W_EXTENDED_COMFORT = 2.0
+W_TOTAL = W_PROGRESS + W_LANE_KEEPING + W_HISTORY_COMFORT + W_EXTENDED_COMFORT
+
 LANE_DEVIATION_LIMIT = 0.5
 LANE_KEEPING_WINDOW = 2.0
-TTC_HORIZON = 1.0
 STOPPED_SPEED_THRESHOLD = 5e-2
 MAX_ACCEL, MAX_JERK, MAX_YAW_RATE = 4.89, 8.37, 0.95
-EC_ACCEL_THRESH, EC_JERK_THRESH, EC_YAW_RATE_THRESH = 0.7, 0.5, 0.1
+EC_ACCEL_THRESH, EC_YAW_RATE_THRESH = 0.7, 0.1
 
 
-class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
+class EPDMSEgoScorerV1(BaseTrajectoryScorer):
     """
-    Optimized EPDMS trajectory scorer.
+    EPDMS Ego Scorer V1 with plan continuity via previous trajectory reuse.
 
-    Pre-computes per-frame data (agent polygons, traffic lights) shared across
-    all N candidates, caches per-candidate data (ego polygons, nearby lanes),
-    and uses AABB pre-filtering to minimize expensive Shapely operations.
+    Scores new candidates over the full horizon, then compares the best new
+    score against a freshly re-scored remaining segment of the previous
+    trajectory at the current replan time. Keeps the old trajectory if it
+    still has enough remaining waypoints and remains competitive.
     """
 
     def __init__(self):
@@ -56,13 +64,19 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         self.env = None
         self.sdc_id = None
         self.all_lanes = []
-        self.all_lane_bounds = None  # (num_lanes, 4) array of [minx, miny, maxx, maxy]
+        self.all_lane_bounds = None
         self.traffic_lights = {}
         self.world_to_sim_offset = np.array([0.0, 0.0])
         self.scenario_dt = 0.1
         self.planner_dt = 0.5
         self.gt_stride = 5
         self.prev_frame_idx = None
+
+        # V1: cached previous best trajectory info
+        self._prev_best_interp = None       # (H*gt_stride, 3) interpolated sim-frame waypoints
+        self._prev_best_consumed = 0        # int: how many sim frames consumed so far
+        self._prev_best_ego_pos = None      # (2,): ego world position at prediction frame
+        self._prev_best_ego_heading = None  # float: ego world heading at prediction frame
 
     def initialize(self, scenario_data: dict, env):
         """Initialize scorer with scenario data and environment."""
@@ -89,7 +103,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         else:
             self.gt_stride = 5
 
-        # Map extraction + pre-compute lane bounds for vectorized nearby query
+        # Map extraction + pre-compute lane bounds
         self.all_lanes = []
         self.traffic_lights = scenario_data.get('dynamic_map_states', {})
 
@@ -106,10 +120,9 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                             if hasattr(lane, 'shapely_polygon'):
                                 self.all_lanes.append((lane, lane.shapely_polygon))
 
-        # Pre-compute lane bounds as numpy array for vectorized nearby queries
         if self.all_lanes:
-            bounds = np.array([poly.bounds for _, poly in self.all_lanes])  # (num_lanes, 4)
-            self.all_lane_bounds = bounds  # [minx, miny, maxx, maxy]
+            bounds = np.array([poly.bounds for _, poly in self.all_lanes])
+            self.all_lane_bounds = bounds
         else:
             self.all_lane_bounds = np.empty((0, 4))
 
@@ -119,24 +132,24 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
             start_pos_world = sdc_track['state']['position'][0][:2]
             start_pos_sim = self.env.agent.position
             self.world_to_sim_offset = np.array(start_pos_sim) - np.array(start_pos_world)
-            print(f"[EPDMS Fast] Calibrated World->Sim Offset: {self.world_to_sim_offset}")
+            print(f"[EPDMS Ego V1] Calibrated World->Sim Offset: {self.world_to_sim_offset}")
         else:
             self.world_to_sim_offset = np.array([0.0, 0.0])
-            print("[EPDMS Fast] Could not calibrate coordinates (Frame 0 invalid).")
+            print("[EPDMS Ego V1] Could not calibrate coordinates (Frame 0 invalid).")
 
         self.prev_frame_idx = None
+        self._prev_best_interp = None
+        self._prev_best_consumed = 0
+        self._prev_best_ego_pos = None
+        self._prev_best_ego_heading = None
         self._initialized = True
-        print(f"[EPDMS Fast] Initialized with {len(self.all_lanes)} lanes")
+        print(f"[EPDMS Ego V1] Initialized with {len(self.all_lanes)} lanes (no NC/TTC)")
 
     # ---------------------------------------------------------------
-    # Vectorized helpers
+    # Helpers (same as EPDMSEgoScorer)
     # ---------------------------------------------------------------
-
-    def _to_sim_frame(self, points: np.ndarray) -> np.ndarray:
-        return points + self.world_to_sim_offset
 
     def _query_nearby_lanes_vec(self, x: float, y: float, radius: float) -> List[int]:
-        """Return indices into self.all_lanes using vectorized bounds check."""
         if len(self.all_lane_bounds) == 0:
             return []
         bounds = self.all_lane_bounds
@@ -151,16 +164,6 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
             corners[i, 0] = x + cx * cos_h - cy * sin_h
             corners[i, 1] = y + cx * sin_h + cy * cos_h
         return Polygon(corners)
-
-    def _get_ego_aabb(self, x: float, y: float) -> Tuple[float, float, float, float]:
-        """Fast AABB for ego vehicle (conservative circle-based)."""
-        return (x - VEHICLE_HALF_DIAG, y - VEHICLE_HALF_DIAG,
-                x + VEHICLE_HALF_DIAG, y + VEHICLE_HALF_DIAG)
-
-    @staticmethod
-    def _aabb_overlap(a: Tuple, b: Tuple) -> bool:
-        """Check if two AABBs (minx, miny, maxx, maxy) overlap."""
-        return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
 
     def _get_best_lane(self, x: float, y: float, heading: float,
                        nearby_indices: List[int], speed: float = None):
@@ -188,39 +191,12 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         return None
 
     # ---------------------------------------------------------------
-    # Pre-computation (called once per select_best, shared by all N)
+    # Pre-computation (traffic lights)
     # ---------------------------------------------------------------
 
-    def _precompute_frame_data(self, frame_idx: int, horizon: int):
-        """Pre-compute per-timestep agent polygons and traffic light states."""
-        tracks = self.scenario_data['tracks']
+    def _precompute_red_lanes(self, frame_idx: int, horizon: int):
+        """Pre-compute per-timestep traffic light red lane IDs."""
         scenario_length = self.scenario_data['length']
-
-        # Agent data: list of lists, one per timestep
-        # Each entry: (poly, aabb, x, y, heading, type)
-        agents_per_t = []
-        for t in range(horizon):
-            sim_frame = frame_idx + (t * self.gt_stride)
-            agents_at_t = []
-            if sim_frame < scenario_length:
-                for obj_id, track in tracks.items():
-                    if obj_id == self.sdc_id:
-                        continue
-                    if track['type'] not in ['VEHICLE', 'CYCLIST']:
-                        continue
-                    pos_arr = track['state']['position']
-                    valid_arr = track['state']['valid']
-                    if sim_frame >= len(pos_arr) or not valid_arr[sim_frame]:
-                        continue
-                    obj_pos_world = pos_arr[sim_frame][:2]
-                    ax, ay = obj_pos_world + self.world_to_sim_offset
-                    ah = track['state']['heading'][sim_frame]
-                    poly = self._get_ego_polygon(ax, ay, ah)
-                    aabb = poly.bounds  # (minx, miny, maxx, maxy)
-                    agents_at_t.append((poly, aabb, ax, ay))
-            agents_per_t.append(agents_at_t)
-
-        # Traffic light red lane IDs per timestep
         red_lanes_per_t = []
         for t in range(horizon):
             sim_frame = frame_idx + (t * self.gt_stride)
@@ -231,29 +207,17 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                     if sim_frame < len(s_list) and s_list[sim_frame] == "LANE_STATE_STOP":
                         red_ids.add(str(lane_id))
             red_lanes_per_t.append(red_ids)
-
-        return agents_per_t, red_lanes_per_t
+        return red_lanes_per_t
 
     # ---------------------------------------------------------------
     # Batched trajectory state computation
     # ---------------------------------------------------------------
 
     def _get_all_trajectory_states(self, all_paths: np.ndarray, dt: float):
-        """
-        Vectorized trajectory states for all N candidates.
-
-        Args:
-            all_paths: (N, T, 2) array of paths in sim frame
-            dt: time step between waypoints
-
-        Returns:
-            dict of arrays, each (N, T):
-                x, y, heading, speed, acceleration, jerk, yaw_rate
-        """
+        """Vectorized trajectory states for all N candidates."""
         N, T, _ = all_paths.shape
         paths = all_paths.copy()
 
-        # Savgol filtering per candidate (can't fully vectorize due to per-row filter)
         window_size = min(7, T if T % 2 != 0 else T - 1)
         if window_size >= 3:
             for i in range(N):
@@ -263,33 +227,31 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                 except Exception:
                     pass
 
-        # Vectorized finite differences across all candidates: (N, T-1, 2)
         dpath = np.diff(paths, axis=1) / dt
-        # Pad last row: (N, T, 2)
         vel_vec = np.concatenate([dpath, dpath[:, -1:, :]], axis=1)
 
-        heading = np.arctan2(vel_vec[:, :, 1], vel_vec[:, :, 0])  # (N, T)
+        heading = np.arctan2(vel_vec[:, :, 1], vel_vec[:, :, 0])
         heading = np.unwrap(heading, axis=1)
 
         dacc = np.diff(vel_vec, axis=1) / dt
         acc_vec = np.concatenate([dacc, dacc[:, -1:, :]], axis=1)
-        acc_mag = np.linalg.norm(acc_vec, axis=2)  # (N, T)
+        acc_mag = np.linalg.norm(acc_vec, axis=2)
 
         djerk = np.diff(acc_vec, axis=1) / dt
         jerk_vec = np.concatenate([djerk, djerk[:, -1:, :]], axis=1)
-        jerk_mag = np.linalg.norm(jerk_vec, axis=2)  # (N, T)
+        jerk_mag = np.linalg.norm(jerk_vec, axis=2)
 
         yaw_rate_raw = np.diff(heading, axis=1) / dt
-        yaw_rate = np.concatenate([yaw_rate_raw, yaw_rate_raw[:, -1:]], axis=1)  # (N, T)
+        yaw_rate = np.concatenate([yaw_rate_raw, yaw_rate_raw[:, -1:]], axis=1)
 
-        speed = np.linalg.norm(vel_vec, axis=2)  # (N, T)
+        speed = np.linalg.norm(vel_vec, axis=2)
         stopped_mask = speed < STOPPED_SPEED_THRESHOLD
         acc_mag[stopped_mask] = 0.0
         jerk_mag[stopped_mask] = 0.0
         yaw_rate[stopped_mask] = 0.0
 
         return {
-            "x": paths[:, :, 0],  # (N, T)
+            "x": paths[:, :, 0],
             "y": paths[:, :, 1],
             "heading": heading,
             "speed": speed,
@@ -299,27 +261,21 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         }
 
     # ---------------------------------------------------------------
-    # Per-candidate metric evaluation (with caches + precomputed data)
+    # Per-candidate metric evaluation (no NC/TTC)
     # ---------------------------------------------------------------
 
     def _calculate_metrics(self, states: dict, horizon: int, frame_idx: int,
                            ego_state: Optional[Dict[str, Any]] = None,
                            n_execute: int = None,
-                           agents_per_t: list = None,
                            red_lanes_per_t: list = None) -> dict:
         metrics = {
-            "nc": 1.0, "dac": 1.0, "ddc": 1.0, "tlc": 1.0,
-            "ep": 0.0, "ttc": 1.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
+            "dac": 1.0, "ddc": 1.0, "tlc": 1.0,
+            "ep": 0.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
         }
 
-        # --- Pre-build caches for this candidate ---
-        # Ego polygons: create once, reuse for DAC, NC, TLC
         ego_polys = [self._get_ego_polygon(states['x'][t], states['y'][t], states['heading'][t])
                      for t in range(horizon)]
-        ego_aabbs = [self._get_ego_aabb(states['x'][t], states['y'][t])
-                     for t in range(horizon)]
 
-        # Nearby lanes cache: key = (t, radius) -> list of lane indices
         nearby_cache = {}
 
         def get_nearby(t, radius):
@@ -329,7 +285,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                     states['x'][t], states['y'][t], radius)
             return nearby_cache[key]
 
-        # 1. DAC (ratio of waypoints inside drivable area)
+        # 1. DAC
         dac_valid = 0
         for t in range(horizon):
             nearby_idx = get_nearby(t, 15.0)
@@ -345,34 +301,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                 dac_valid += 1
         metrics['dac'] = dac_valid / horizon if horizon > 0 else 1.0
 
-        # 2. NC & TTC (with AABB pre-filter + pre-computed agent polys)
-        if agents_per_t is not None:
-            for t in range(horizon):
-                ego_v = states['speed'][t]
-                ego_aabb = ego_aabbs[t]
-                for agent_poly, agent_aabb, ax, ay in agents_per_t[t]:
-                    # AABB pre-filter
-                    if not self._aabb_overlap(ego_aabb, agent_aabb):
-                        continue
-                    if ego_polys[t].intersects(agent_poly):
-                        is_at_fault = True
-                        if ego_v < STOPPED_SPEED_THRESHOLD:
-                            is_at_fault = False
-                        dx, dy = ax - states['x'][t], ay - states['y'][t]
-                        ego_hx = math.cos(states['heading'][t])
-                        ego_hy = math.sin(states['heading'][t])
-                        longitudinal_dist = dx * ego_hx + dy * ego_hy
-                        if longitudinal_dist < -1.0:
-                            is_at_fault = False
-                        if is_at_fault:
-                            metrics['nc'] = 0.0
-                            if t * self.planner_dt <= TTC_HORIZON:
-                                metrics['ttc'] = 0.0
-                            break
-                if metrics['nc'] == 0.0:
-                    break
-
-        # 3. DDC
+        # 2. DDC
         if metrics['dac'] > 0:
             for t in range(0, horizon, 5):
                 nearby_idx = get_nearby(t, 15.0)
@@ -392,7 +321,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                         metrics['ddc'] = 0.0
                         break
 
-        # 4. TLC (with pre-computed red lane IDs)
+        # 3. TLC
         if red_lanes_per_t is not None:
             for t in range(horizon):
                 red_ids = red_lanes_per_t[t]
@@ -416,7 +345,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                 if metrics['tlc'] == 0.0:
                     break
 
-        # 5. Lane Keeping
+        # 4. Lane Keeping
         consecutive_bad = 0
         if metrics['dac'] > 0:
             for t in range(horizon):
@@ -436,14 +365,14 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
                     metrics['lk'] = 0.0
                     break
 
-        # 6. HC
+        # 5. HC
         max_acc = np.max(states['acceleration'])
         max_jerk = np.max(states['jerk'])
         max_yr = np.max(np.abs(states['yaw_rate']))
         if max_acc > MAX_ACCEL or max_jerk > MAX_JERK or max_yr > MAX_YAW_RATE:
             metrics['hc'] = 0.0
 
-        # 7. EC (smoothness from current ego state through executed waypoints)
+        # 6. EC
         if ego_state is not None:
             ego_acc = np.linalg.norm(ego_state['acceleration'][:2])
             ego_yr = abs(ego_state.get('angular_velocity', np.zeros(3))[2])
@@ -455,7 +384,7 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
             comfortable = (diff_acc <= EC_ACCEL_THRESH) & (diff_yr <= EC_YAW_RATE_THRESH)
             metrics['ec'] = float(comfortable.sum()) / len(comfortable) if len(comfortable) > 0 else 1.0
 
-        # 8. Progress
+        # 7. Progress
         dist = math.sqrt((states['x'][-1] - states['x'][0]) ** 2 +
                          (states['y'][-1] - states['y'][0]) ** 2)
         metrics['ep'] = min(dist / 30.0, 1.0)
@@ -463,11 +392,92 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         return metrics
 
     # ---------------------------------------------------------------
+    # Score computation helper
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _metrics_to_score(metrics: dict) -> float:
+        """Convert metrics dict to scalar score."""
+        multi_prod = metrics['dac'] * metrics['ddc'] * metrics['tlc']
+        weighted_sum = (W_PROGRESS * metrics['ep'] +
+                        W_LANE_KEEPING * metrics['lk'] +
+                        W_HISTORY_COMFORT * metrics['hc'] +
+                        W_EXTENDED_COMFORT * metrics['ec'])
+        return multi_prod * weighted_sum / W_TOTAL
+
+    def _score_single_world_traj(
+        self,
+        traj_world: np.ndarray,
+        frame_idx: int,
+        ego_state: Dict[str, Any],
+        n_execute: Optional[int],
+    ) -> float:
+        """
+        Score one candidate trajectory in world frame at current replan time.
+
+        Args:
+            traj_world: (T, 2) future waypoints in world frame (no current point).
+            frame_idx: Current scenario frame index.
+            ego_state: Current ego state dict.
+            n_execute: Planner steps to execute before next replan.
+        """
+        horizon = len(traj_world)
+        if horizon <= 0:
+            return 0.0
+
+        sdc_track = self.scenario_data['tracks'][self.sdc_id]
+        current_pos = sdc_track['state']['position'][frame_idx][:2]
+
+        ego_pos_tiled = np.broadcast_to(current_pos[None, :], (1, 1, 2))
+        traj_world_batched = traj_world[None, :, :]
+        all_paths_world = np.concatenate([ego_pos_tiled, traj_world_batched], axis=1)  # (1, T+1, 2)
+        all_paths_sim = all_paths_world + self.world_to_sim_offset
+
+        all_states = self._get_all_trajectory_states(all_paths_sim, self.planner_dt)
+        states_0 = {k: all_states[k][0] for k in all_states}
+        red_lanes_per_t = self._precompute_red_lanes(frame_idx, horizon)
+        metrics = self._calculate_metrics(
+            states_0,
+            horizon,
+            frame_idx,
+            ego_state=ego_state,
+            n_execute=n_execute,
+            red_lanes_per_t=red_lanes_per_t,
+        )
+        return self._metrics_to_score(metrics)
+
+    # ---------------------------------------------------------------
+    # Interpolation helper
+    # ---------------------------------------------------------------
+
+    def _interpolate_raw_to_sim(self, raw: np.ndarray) -> np.ndarray:
+        """
+        Interpolate raw planner waypoints (H, 3) at planner_dt intervals
+        to sim_dt intervals -> (H * gt_stride, 3).
+
+        Prepends ego origin (0,0,0) for smooth interpolation, then samples
+        at sim_dt starting from sim_dt (same convention as base_evaluator).
+        """
+        H = raw.shape[0]
+        origin = np.zeros((1, 3))
+        with_origin = np.concatenate([origin, raw], axis=0)  # (H+1, 3)
+
+        t_orig = np.arange(H + 1) * self.planner_dt  # [0, 0.5, 1.0, ...]
+        t_max = t_orig[-1]
+        t_interp = np.arange(self.scenario_dt, t_max + self.scenario_dt / 2, self.scenario_dt)
+
+        interp_x = np.interp(t_interp, t_orig, with_origin[:, 0])
+        interp_y = np.interp(t_interp, t_orig, with_origin[:, 1])
+        interp_h = np.interp(t_interp, t_orig, with_origin[:, 2])
+
+        return np.stack([interp_x, interp_y, interp_h], axis=-1)  # (H*gt_stride, 3)
+
+    # ---------------------------------------------------------------
     # Coordinate transforms
     # ---------------------------------------------------------------
 
     def _ego_to_world(self, candidates_np: np.ndarray, ego_state: Dict[str, Any]) -> np.ndarray:
-        """Vectorized ego→world transform. (N, 8, 3) → (N, 8, 2)."""
+        """Vectorized ego->world transform. (N, T, 3) -> (N, T, 2)."""
         ego_x, ego_y = ego_state['position'][:2]
         ego_heading = ego_state['heading']
         cos_h, sin_h = np.cos(ego_heading), np.sin(ego_heading)
@@ -477,41 +487,85 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
         world_y = ego_y + x_fwd * sin_h + y_lat * cos_h
         return np.stack([world_x, world_y], axis=-1)
 
+    def _reproject_from_old_ego_to_current_ego(
+        self,
+        traj_old_ego: np.ndarray,
+        old_ego_pos: np.ndarray,
+        old_ego_heading: float,
+        current_ego_pos: np.ndarray,
+        current_ego_heading: float,
+    ) -> np.ndarray:
+        """
+        Reproject trajectory from previous prediction ego frame to current ego frame.
+
+        Input/Output trajectory convention follows model output: [:, 0]=forward, [:, 1]=lateral.
+        """
+        if traj_old_ego.size == 0:
+            return traj_old_ego
+
+        traj_curr_ego = traj_old_ego.copy()
+
+        old_forward = traj_old_ego[:, 0]
+        old_lateral = traj_old_ego[:, 1]
+        old_cos, old_sin = math.cos(old_ego_heading), math.sin(old_ego_heading)
+
+        # old ego -> world
+        world_x = old_ego_pos[0] + old_forward * old_cos - old_lateral * old_sin
+        world_y = old_ego_pos[1] + old_forward * old_sin + old_lateral * old_cos
+
+        # world -> current ego
+        dx = world_x - current_ego_pos[0]
+        dy = world_y - current_ego_pos[1]
+        cur_cos, cur_sin = math.cos(current_ego_heading), math.sin(current_ego_heading)
+        traj_curr_ego[:, 0] = dx * cur_cos + dy * cur_sin
+        traj_curr_ego[:, 1] = -dx * cur_sin + dy * cur_cos
+
+        # Keep heading consistent if third column exists (currently unused by evaluator).
+        if traj_curr_ego.shape[1] > 2:
+            heading_delta = old_ego_heading - current_ego_heading
+            traj_curr_ego[:, 2] = np.arctan2(
+                np.sin(traj_old_ego[:, 2] + heading_delta),
+                np.cos(traj_old_ego[:, 2] + heading_delta),
+            )
+
+        return traj_curr_ego
+
     # ---------------------------------------------------------------
     # Main entry point
     # ---------------------------------------------------------------
 
     def select_best(self, model_output: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         if not self._initialized:
-            raise RuntimeError("EPDMSTrajectoryScorer_Fast not initialized.")
+            raise RuntimeError("EPDMSEgoScorerV1 not initialized.")
 
         t_start = time.time()
 
         ego_state = kwargs['ego_state']
         frame_idx = kwargs['frame_idx']
 
-        # Compute n_execute from replan interval
+        # Compute replan interval in sim frames and planner steps
         if self.prev_frame_idx is not None:
-            replan_interval_s = (frame_idx - self.prev_frame_idx) * self.scenario_dt
+            replan_sim_frames = frame_idx - self.prev_frame_idx  # exact sim frames elapsed
+            replan_interval_s = replan_sim_frames * self.scenario_dt
             n_execute = max(1, int(round(replan_interval_s / self.planner_dt)))
         else:
-            n_execute = None
+            replan_sim_frames = None
+            n_execute = None  # First call
 
         all_candidates = model_output["all_candidates"]  # (B, N, 8, 3) tensor
-        candidates_np = all_candidates[0].cpu().numpy()  # (N, 8, 3)
+        candidates_np = all_candidates[0].cpu().numpy()   # (N, 8, 3)
         N = candidates_np.shape[0]
         horizon = candidates_np.shape[1]  # 8
 
-        # --- Step 1: Pre-compute per-frame data (shared across all candidates) ---
-        agents_per_t, red_lanes_per_t = self._precompute_frame_data(frame_idx, horizon)
+        # --- Pre-compute traffic light data ---
+        red_lanes_per_t = self._precompute_red_lanes(frame_idx, horizon)
 
-        # --- Step 2: Transform all candidates to world frame ---
+        # --- Transform new candidates to world frame ---
         candidates_world = self._ego_to_world(candidates_np, ego_state)  # (N, 8, 2)
 
-        # --- Step 3: Build all full paths (prepend ego pos) and transform to sim ---
+        # --- Validate current frame ---
         sdc_track = self.scenario_data['tracks'][self.sdc_id]
         if not sdc_track['state']['valid'][frame_idx]:
-            # No valid ego position — return zeros
             best_traj = all_candidates[0, 0]
             return {
                 "trajectory": best_traj.unsqueeze(0),
@@ -520,52 +574,130 @@ class EPDMSTrajectoryScorer_Fast(BaseTrajectoryScorer):
             }
 
         current_pos = sdc_track['state']['position'][frame_idx][:2]
-        # (N, 1, 2) ego pos broadcast + (N, 8, 2) candidates → (N, 9, 2) full paths
+
+        # --- Score all new candidates (full horizon, same as baseline) ---
         ego_pos_tiled = np.broadcast_to(current_pos[None, None, :], (N, 1, 2))
         all_paths_world = np.concatenate([ego_pos_tiled, candidates_world], axis=1)  # (N, 9, 2)
         all_paths_sim = all_paths_world + self.world_to_sim_offset  # (N, 9, 2)
 
-        # --- Step 4: Vectorized trajectory states ---
         all_states = self._get_all_trajectory_states(all_paths_sim, self.planner_dt)
 
-        # --- Step 5: Score each candidate ---
         scores = np.zeros(N)
         for i in range(N):
-            # Extract per-candidate states (views, no copy)
-            states_i = {
-                "x": all_states["x"][i],
-                "y": all_states["y"][i],
-                "heading": all_states["heading"][i],
-                "speed": all_states["speed"][i],
-                "acceleration": all_states["acceleration"][i],
-                "jerk": all_states["jerk"][i],
-                "yaw_rate": all_states["yaw_rate"][i],
-            }
-
+            states_i = {k: all_states[k][i] for k in all_states}
             metrics = self._calculate_metrics(
                 states_i, horizon, frame_idx,
                 ego_state=ego_state, n_execute=n_execute,
-                agents_per_t=agents_per_t, red_lanes_per_t=red_lanes_per_t,
+                red_lanes_per_t=red_lanes_per_t,
             )
+            scores[i] = self._metrics_to_score(metrics)
 
-            multi_prod = metrics['nc'] * metrics['dac'] * metrics['ddc'] * metrics['tlc']
-            weighted_sum = (W_PROGRESS * metrics['ep'] + W_TTC * metrics['ttc'] +
-                            W_LANE_KEEPING * metrics['lk'] + W_HISTORY_COMFORT * metrics['hc'] +
-                            W_EXTENDED_COMFORT * metrics['ec'])
-            scores[i] = multi_prod * weighted_sum / W_TOTAL
+        # Step 1: Select top-K new candidates by full-horizon score
+        top_k = min(5, N)
+        top_new_indices = np.argsort(scores)[::-1][:top_k]
+        best_new_idx = top_new_indices[0]
+        best_new_score = scores[best_new_idx]
 
-        best_idx = int(np.argmax(scores))
-        self.prev_frame_idx = frame_idx
+        # --- V1: Compare against previous trajectory (re-score remaining segment) ---
+        keep_prev = False
+        shifted_planner = None
+        prev_remaining_score = None
+        best_new_trimmed_score = None
 
-        elapsed = time.time() - t_start
-        print(f"[EPDMS Fast] Frame {frame_idx}: best_idx={best_idx}/{N}, "
-              f"score={scores[best_idx]:.4f}, max={scores.max():.4f}, "
-              f"mean={scores.mean():.4f}, min={scores.min():.4f}, "
-              f"time={elapsed:.2f}s ({elapsed/N*1000:.1f}ms/cand)")
+        if (self._prev_best_interp is not None
+                and self._prev_best_ego_pos is not None
+                and self._prev_best_ego_heading is not None
+                and replan_sim_frames is not None):
+            new_consumed = self._prev_best_consumed + replan_sim_frames
+            total_sim = len(self._prev_best_interp)
+            remaining_sim = total_sim - new_consumed
 
-        best_traj = all_candidates[0, best_idx]
-        return {
-            "trajectory": best_traj.unsqueeze(0),
-            "scores": torch.from_numpy(scores).unsqueeze(0).float(),
-            "best_idx": torch.tensor([best_idx]),
-        }
+            if remaining_sim > 0:
+                shifted_interp = self._prev_best_interp[new_consumed:]
+
+                planner_indices = np.arange(self.gt_stride - 1, len(shifted_interp), self.gt_stride)
+
+                if len(planner_indices) > 0:
+                    shifted_planner = shifted_interp[planner_indices]
+                    n_planner = len(shifted_planner)
+
+                    if n_planner >= 2 * n_execute:
+                        shifted_planner_current = self._reproject_from_old_ego_to_current_ego(
+                            shifted_planner,
+                            self._prev_best_ego_pos,
+                            self._prev_best_ego_heading,
+                            np.array(ego_state['position'][:2]),
+                            float(ego_state['heading']),
+                        )
+                        shifted_world = self._ego_to_world(
+                            shifted_planner_current[None, :, :], ego_state
+                        )[0]
+                        prev_remaining_score = self._score_single_world_traj(
+                            shifted_world,
+                            frame_idx,
+                            ego_state,
+                            n_execute,
+                        )
+
+                        # Step 2: Re-score top-K new candidates trimmed to same
+                        # horizon as old trajectory for fair comparison
+                        best_new_trimmed_score = -1.0
+                        for idx in top_new_indices:
+                            trimmed_world = candidates_world[idx][:n_planner]
+                            trimmed_score = self._score_single_world_traj(
+                                trimmed_world,
+                                frame_idx,
+                                ego_state,
+                                n_execute,
+                            )
+                            if trimmed_score > best_new_trimmed_score:
+                                best_new_trimmed_score = trimmed_score
+                                best_new_idx = idx
+
+                        if prev_remaining_score >= best_new_trimmed_score:
+                            keep_prev = True
+
+        # --- Build result ---
+        if keep_prev:
+            # shifted_planner_current already computed above
+            best_traj = torch.from_numpy(shifted_planner_current).float()
+
+            self._prev_best_consumed = self._prev_best_consumed + replan_sim_frames
+
+            elapsed = time.time() - t_start
+            n_wp = len(shifted_planner_current)
+            print(f"[EPDMS Ego V1] Frame {frame_idx}: KEPT prev_best, "
+                  f"prev_remaining={prev_remaining_score:.4f}, "
+                  f"best_new_trimmed={best_new_trimmed_score:.4f}, "
+                  f"best_new_full={best_new_score:.4f}, "
+                  f"remaining_wp={n_wp}, consumed_sim={self._prev_best_consumed}, "
+                  f"replan_frames={replan_sim_frames}, time={elapsed:.2f}s")
+
+            self.prev_frame_idx = frame_idx
+            return {
+                "trajectory": best_traj.unsqueeze(0),
+                "scores": torch.from_numpy(scores).unsqueeze(0).float(),
+                "best_idx": torch.tensor([-1]),  # -1 indicates previous trajectory was kept
+            }
+        else:
+            # Switch to new best trajectory
+            best_traj = all_candidates[0, best_new_idx]
+
+            # Cache: interpolate raw planner waypoints to sim-frame resolution
+            raw = candidates_np[best_new_idx]  # (8, 3)
+            self._prev_best_interp = self._interpolate_raw_to_sim(raw)  # (40, 3)
+            self._prev_best_consumed = 0
+            self._prev_best_ego_pos = np.array(ego_state['position'][:2], dtype=np.float64).copy()
+            self._prev_best_ego_heading = float(ego_state['heading'])
+
+            elapsed = time.time() - t_start
+            print(f"[EPDMS Ego V1] Frame {frame_idx}: SWITCH to new idx={best_new_idx}/{N}, "
+                  f"score={scores[best_new_idx]:.4f}, "
+                  f"K={n_execute}, replan_frames={replan_sim_frames}, time={elapsed:.2f}s")
+
+            self.prev_frame_idx = frame_idx
+            return {
+                "trajectory": best_traj.unsqueeze(0),
+                "scores": torch.from_numpy(scores).unsqueeze(0).float(),
+                "best_idx": torch.tensor([best_new_idx]),
+            }

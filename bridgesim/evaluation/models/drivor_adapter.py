@@ -175,6 +175,8 @@ class DrivoRAdapter(BaseModelAdapter):
         image_size: tuple = None,  # Ignored - model uses fixed size
         num_poses: int = 8,
         use_lidar: bool = False,
+        scorer=None,
+        num_proposals: int = None,
         **kwargs
     ):
         """
@@ -187,6 +189,10 @@ class DrivoRAdapter(BaseModelAdapter):
             image_size: Ignored - model uses fixed size (1148, 672) to match checkpoint
             num_poses: Number of trajectory poses
             use_lidar: Whether to use LiDAR input
+            scorer: Optional BaseTrajectoryScorer instance for candidate selection.
+                    When set, returns all proposals for external scoring.
+            num_proposals: If set, truncate candidates to the first num_proposals
+                           before passing to the scorer.
         """
         super().__init__(checkpoint_path, config_path=config_path, **kwargs)
         self.num_cameras = num_cameras
@@ -194,6 +200,9 @@ class DrivoRAdapter(BaseModelAdapter):
         self.image_size = self.MODEL_IMAGE_SIZE
         self.num_poses = num_poses
         self.use_lidar = use_lidar
+        self.scorer = scorer
+        self.num_proposals = num_proposals
+        self._current_frame_id = 0
         self.config = None
 
         # Camera order for processing (front first, then others)
@@ -357,6 +366,8 @@ class DrivoRAdapter(BaseModelAdapter):
         Returns:
             Dictionary with model inputs
         """
+        self._current_frame_id = frame_id
+
         # 1. Preprocess images
         camera_feature = self._preprocess_images(images).unsqueeze(0).to(self.device)
 
@@ -406,8 +417,54 @@ class DrivoRAdapter(BaseModelAdapter):
         Returns:
             Dictionary with trajectory and optional scores
         """
-        # Extract best trajectory (already selected by model based on PDM scores)
-        trajectory = model_output["trajectory"][0].cpu().numpy()  # (num_poses, 3)
+        if self.scorer is not None:
+            # Use external scorer to select best trajectory from all proposals
+            all_proposals = model_output["proposals"]  # (B, 64, 8, 3)
+
+            # Optionally truncate to first num_proposals candidates
+            if self.num_proposals is not None:
+                k = self.num_proposals
+                total = all_proposals.shape[1]
+                all_proposals = all_proposals[:, :k]
+                print(f"[DrivoR] Truncated proposals: {total} -> {k}")
+
+            scorer_input = {"all_candidates": all_proposals}
+            result = self.scorer.select_best(
+                scorer_input,
+                ego_state=ego_state,
+                frame_idx=self._current_frame_id,
+            )
+            trajectory = result["trajectory"][0].cpu().numpy()  # (T, 3)
+            traj_swapped = np.column_stack([trajectory[:, 1], trajectory[:, 0]])
+            parsed = {
+                'trajectory': traj_swapped,
+                'best_idx': result["best_idx"][0].item(),
+                'num_candidates': all_proposals.shape[1],
+            }
+
+            # Include all candidates and scores for visualization
+            all_cands = all_proposals[0].cpu().numpy()  # (N, T, 3)
+            cands_swapped = np.stack([
+                np.column_stack([c[:, 1], c[:, 0]]) for c in all_cands
+            ])
+            parsed['trajectory_coarse'] = cands_swapped
+            parsed['coarse_scores'] = result["scores"][0].cpu().numpy()
+
+            return parsed
+
+        # Default: use model's internal selection, optionally with num_proposals truncation
+        if self.num_proposals is not None and "proposals" in model_output and "pdm_score" in model_output:
+            # Truncate to first num_proposals, then use model's own scores to select best
+            k = self.num_proposals
+            total = model_output["proposals"].shape[1]
+            proposals = model_output["proposals"][:, :k]  # (B, k, 8, 3)
+            pdm_score = model_output["pdm_score"][:, :k]  # (B, k)
+            best_idx = torch.argmax(pdm_score, dim=1)  # (B,)
+            batch_size = proposals.shape[0]
+            trajectory = proposals[torch.arange(batch_size), best_idx][0].cpu().numpy()
+            print(f"[DrivoR] Truncated proposals (no scorer): {total} -> {k}")
+        else:
+            trajectory = model_output["trajectory"][0].cpu().numpy()  # (num_poses, 3)
 
         # Extract x, y coordinates and swap columns (model outputs [forward, lateral] but evaluator expects [lateral, forward])
         trajectory_xy = np.column_stack([trajectory[:, 1], trajectory[:, 0]])

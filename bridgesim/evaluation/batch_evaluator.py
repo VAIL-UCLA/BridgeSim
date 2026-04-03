@@ -293,7 +293,6 @@ class BatchEvaluator:
                         'timestamp': datetime.now().isoformat()
                     }
                 else:
-                    print(f"Results file not found for scenario: {scenario_name} at {results_file}")
                     return {
                         'status': 'error',
                         'duration': duration,
@@ -770,7 +769,7 @@ def main():
 
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
-                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot"],
+                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
                         help="Model type")
 
     parser.add_argument('--checkpoint', type=str, required=True,
