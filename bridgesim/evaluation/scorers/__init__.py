@@ -1,39 +1,13 @@
 from bridgesim.evaluation.scorers.base_scorer import BaseTrajectoryScorer
-from bridgesim.evaluation.scorers.confidence_scorer import ConfidenceScorer
-from bridgesim.evaluation.scorers.coarse_topk_scorer import CoarseTopKScorer
-from bridgesim.evaluation.scorers.epdms_trajectory_scorer import EPDMSTrajectoryScorer
-from bridgesim.evaluation.scorers.epdms_trajectory_scorer_fast import EPDMSTrajectoryScorer_Fast
-from bridgesim.evaluation.scorers.epdms_ego_scorer import EPDMSEgoScorer
-from bridgesim.evaluation.scorers.epdms_ego_scorer_v1 import EPDMSEgoScorerV1
-from bridgesim.evaluation.scorers.epdms_ego_ttc_scorer import EPDMSEgoTTCScorer
-from bridgesim.evaluation.scorers.epdms_ego_ttc_softcol_scorer import EPDMSEgoTTCSoftColScorer
-from bridgesim.evaluation.scorers.epdms_ego_ttc_softcol_softdac_scorer import EPDMSEgoTTCSoftColSoftDACScorer
-from bridgesim.evaluation.scorers.epdms_ego_ttc_2_scorer import EPDMSEgoTTC2Scorer
-from bridgesim.evaluation.scorers.epdms_ego_ttc_3_scorer import EPDMSEgoTTC3Scorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_only_scorer import EPDMSEgoAdaptiveColOnlyScorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_scorer import EPDMSEgoAdaptiveColMapScorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_comfort_scorer import EPDMSEgoAdaptiveColMapComfortScorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_only_scorer import EPDMSEgoAdaptiveComfortOnlyScorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_map_scorer import EPDMSEgoAdaptiveComfortMapScorer
-from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_col_scorer import EPDMSEgoAdaptiveComfortColScorer
+from bridgesim.evaluation.scorers.cls_scorer import ClsScorer
+from bridgesim.evaluation.scorers.learned_scorer import LearnedScorer
+from bridgesim.evaluation.scorers.GT_scorer import GTScorer
+from bridgesim.evaluation.scorers.TTA_scorer import TTAScorer
 
 __all__ = [
     "BaseTrajectoryScorer",
-    "ConfidenceScorer",
-    "CoarseTopKScorer",
-    "EPDMSTrajectoryScorer",
-    "EPDMSTrajectoryScorer_Fast",
-    "EPDMSEgoScorer",
-    "EPDMSEgoScorerV1",
-    "EPDMSEgoTTCScorer",
-    "EPDMSEgoTTCSoftColScorer",
-    "EPDMSEgoTTCSoftColSoftDACScorer",
-    "EPDMSEgoTTC2Scorer",
-    "EPDMSEgoTTC3Scorer",
-    "EPDMSEgoAdaptiveColOnlyScorer",
-    "EPDMSEgoAdaptiveColMapScorer",
-    "EPDMSEgoAdaptiveColMapComfortScorer",
-    "EPDMSEgoAdaptiveComfortOnlyScorer",
-    "EPDMSEgoAdaptiveComfortMapScorer",
-    "EPDMSEgoAdaptiveComfortColScorer",
+    "ClsScorer",
+    "LearnedScorer",
+    "GTScorer",
+    "TTAScorer",
 ]

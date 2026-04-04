@@ -37,84 +37,34 @@ def create_trajectory_scorer(args):
 
     model_type = args.model_type.lower()
 
-    if scorer_name == "confidence":
-        from bridgesim.evaluation.scorers import ConfidenceScorer
-        print("Creating ConfidenceScorer for trajectory selection")
-        return ConfidenceScorer()
+    if scorer_name == "cls":
+        from bridgesim.evaluation.scorers import ClsScorer
+        print("Creating ClsScorer for trajectory selection")
+        return ClsScorer()
 
-    elif scorer_name == "coarse_topk":
-        from bridgesim.evaluation.scorers import CoarseTopKScorer
+    elif scorer_name == "learned":
+        from bridgesim.evaluation.scorers import LearnedScorer
         v2_ckpt = args.v2_scorer_checkpoint
         if model_type == "diffusiondrive" and v2_ckpt is None:
             raise ValueError(
                 "--v2-scorer-checkpoint is required when using "
-                "--trajectory-scorer coarse_topk with DiffusionDrive v1."
+                "--trajectory-scorer learned with DiffusionDrive v1."
             )
-        print(f"Creating CoarseTopKScorer (v2_checkpoint={v2_ckpt})")
-        return CoarseTopKScorer(
+        print(f"Creating LearnedScorer (v2_checkpoint={v2_ckpt})")
+        return LearnedScorer(
             v2_scorer_checkpoint_path=v2_ckpt,
             device="cuda",
         )
 
-    elif scorer_name == "epdms":
-        from bridgesim.evaluation.scorers import EPDMSTrajectoryScorer
-        print("Creating EPDMSTrajectoryScorer (will be initialized after env setup)")
-        return EPDMSTrajectoryScorer()
+    elif scorer_name == "gt":
+        from bridgesim.evaluation.scorers.GT_scorer import GTScorer
+        print("Creating GTScorer (will be initialized after env setup)")
+        return GTScorer()
 
-    elif scorer_name == "epdms_fast":
-        from bridgesim.evaluation.scorers import EPDMSTrajectoryScorer_Fast
-        print("Creating EPDMSTrajectoryScorer_Fast (will be initialized after env setup)")
-        return EPDMSTrajectoryScorer_Fast()
-
-    elif scorer_name == "epdms_ego":
-        from bridgesim.evaluation.scorers import EPDMSEgoScorer
-        print("Creating EPDMSEgoScorer (will be initialized after env setup)")
-        return EPDMSEgoScorer()
-
-    elif scorer_name == "epdms_ego_v1":
-        from bridgesim.evaluation.scorers import EPDMSEgoScorerV1
-        print("Creating EPDMSEgoScorerV1 (will be initialized after env setup)")
-        return EPDMSEgoScorerV1()
-
-    elif scorer_name == "epdms_ego_ttc":
-        from bridgesim.evaluation.scorers import EPDMSEgoTTCScorer
-        print("Creating EPDMSEgoTTCScorer (will be initialized after env setup)")
-        return EPDMSEgoTTCScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_col":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_scorer import EPDMSEgoAdaptiveColScorer
-        print("Creating EPDMSEgoAdaptiveColScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveColScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_col_only":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_only_scorer import EPDMSEgoAdaptiveColOnlyScorer
-        print("Creating EPDMSEgoAdaptiveColOnlyScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveColOnlyScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_col_map":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_scorer import EPDMSEgoAdaptiveColMapScorer
-        print("Creating EPDMSEgoAdaptiveColMapScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveColMapScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_col_map_comfort":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_comfort_scorer import EPDMSEgoAdaptiveColMapComfortScorer
-        print("Creating EPDMSEgoAdaptiveColMapComfortScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveColMapComfortScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_comfort_only":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_only_scorer import EPDMSEgoAdaptiveComfortOnlyScorer
-        print("Creating EPDMSEgoAdaptiveComfortOnlyScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveComfortOnlyScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_comfort_map":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_map_scorer import EPDMSEgoAdaptiveComfortMapScorer
-        print("Creating EPDMSEgoAdaptiveComfortMapScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveComfortMapScorer()
-
-    elif scorer_name == "epdms_ego_adaptive_comfort_col":
-        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_col_scorer import EPDMSEgoAdaptiveComfortColScorer
-        print("Creating EPDMSEgoAdaptiveComfortColScorer (will be initialized after env setup)")
-        return EPDMSEgoAdaptiveComfortColScorer()
+    elif scorer_name == "tta":
+        from bridgesim.evaluation.scorers.TTA_scorer import TTAScorer
+        print("Creating TTAScorer (will be initialized after env setup)")
+        return TTAScorer()
 
     else:
         raise ValueError(f"Unknown trajectory scorer: {scorer_name}")
@@ -318,7 +268,7 @@ def main():
         "--trajectory-scorer",
         type=str,
         default=None,
-        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego", "epdms_ego_v1", "epdms_ego_ttc", "epdms_ego_adaptive_col", "epdms_ego_adaptive_col_only", "epdms_ego_adaptive_col_map", "epdms_ego_adaptive_col_map_comfort", "epdms_ego_adaptive_comfort_only", "epdms_ego_adaptive_comfort_map", "epdms_ego_adaptive_comfort_col"],
+        choices=["cls", "learned", "gt", "tta"],
         help="Trajectory scorer for inference scaling (for DiffusionDrive/V2). "
              "'confidence' uses poses_cls (v1 only). "
              "'coarse_topk' uses v2 learned coarse scorer (v1 needs --v2-scorer-checkpoint). "
