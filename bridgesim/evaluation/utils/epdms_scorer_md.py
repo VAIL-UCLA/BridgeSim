@@ -46,9 +46,6 @@ class EPDMSScorer:
                 elif timestep.size > 1:
                     # Take first element or compute mean difference
                     self.scenario_dt = float(timestep.flat[0]) if timestep.flat[0] > 0 else 0.1
-            elif isinstance(timestep, (list, tuple)):
-                val = timestep[0] if len(timestep) > 0 else 0.1
-                self.scenario_dt = float(val) if float(val) > 0 else 0.1
             else:
                 self.scenario_dt = float(timestep)
         self.planner_dt = 0.5
@@ -843,7 +840,7 @@ class EPDMSScorer:
         # 1. Get CURRENT ego state from simulation
         ego_pos = np.array(self.env.agent.position[:2])
         ego_heading = self.env.agent.heading_theta
-        ego_velocity = np.array(self.env.agent.velocity[:2]) if hasattr(self.env.agent, 'velocity') else np.array([0.0, 0.0])
+        ego_velocity = np.array(self.env.agent.velocity[:2])
         ego_speed = np.linalg.norm(ego_velocity)
 
         # 2. Get CURRENT other agents from simulation

@@ -92,7 +92,7 @@ class V2TransfuserModel(nn.Module):
         )
 
 
-    def forward(self, features: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]=None) -> Dict[str, torch.Tensor]:
+    def forward(self, features: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]=None, use_bev_calibrator: bool = False) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
 
         camera_feature: torch.Tensor = features["camera_feature"]
@@ -101,7 +101,13 @@ class V2TransfuserModel(nn.Module):
 
         batch_size = status_feature.shape[0]
 
-        bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
+        if use_bev_calibrator and hasattr(self, 'bev_calibrator') and self.bev_calibrator is not None:
+            _, bev_feature_raw, _ = self._backbone(camera_feature, lidar_feature)
+            bev_feature_raw = self.bev_calibrator.calibrate(bev_feature_raw)
+            bev_feature_upscale = self._backbone.top_down(bev_feature_raw)
+        else:
+            bev_feature_upscale, bev_feature_raw, _ = self._backbone(camera_feature, lidar_feature)
+        bev_feature = bev_feature_raw
         cross_bev_feature = bev_feature_upscale
         bev_spatial_shape = bev_feature_upscale.shape[2:]
         concat_cross_bev_shape = bev_feature.shape[2:]
@@ -136,6 +142,79 @@ class V2TransfuserModel(nn.Module):
         output.update(agents)
 
         return output
+
+    def forward_inference_scaling(self, features: Dict[str, torch.Tensor], num_groups: int = 1, use_bev_calibrator: bool = False) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass that generates num_groups * 20 trajectory candidates
+        and returns all candidates with scores and intermediate features.
+
+        Args:
+            features: Input features dict with camera_feature, lidar_feature, status_feature.
+            num_groups: Number of groups for plan anchor replication.
+            use_bev_calibrator: Whether to apply BEV calibration.
+
+        Returns:
+            dict with:
+                - "all_candidates": (B, num_groups*20, 8, 3)
+                - "confidence_scores": (B, num_groups*20)
+                - "coarse_scores": None (not available for v1)
+                - "scorer_context": dict of intermediate features for external scorers
+        """
+        camera_feature: torch.Tensor = features["camera_feature"]
+        lidar_feature: torch.Tensor = features["lidar_feature"]
+        status_feature: torch.Tensor = features["status_feature"]
+
+        batch_size = status_feature.shape[0]
+
+        if use_bev_calibrator and hasattr(self, 'bev_calibrator') and self.bev_calibrator is not None:
+            _, bev_feature_raw, _ = self._backbone(camera_feature, lidar_feature)
+            bev_feature_raw = self.bev_calibrator.calibrate(bev_feature_raw)
+            bev_feature_upscale = self._backbone.top_down(bev_feature_raw)
+        else:
+            bev_feature_upscale, bev_feature_raw, _ = self._backbone(camera_feature, lidar_feature)
+        bev_feature = bev_feature_raw
+        cross_bev_feature = bev_feature_upscale
+        bev_spatial_shape = bev_feature_upscale.shape[2:]
+        concat_cross_bev_shape = bev_feature.shape[2:]
+        bev_feature = self._bev_downscale(bev_feature).flatten(-2, -1)
+        bev_feature = bev_feature.permute(0, 2, 1)
+        status_encoding = self._status_encoding(status_feature)
+
+        keyval = torch.concatenate([bev_feature, status_encoding[:, None]], dim=1)
+        keyval += self._keyval_embedding.weight[None, ...]
+
+        concat_cross_bev = keyval[:, :-1].permute(0, 2, 1).contiguous().view(batch_size, -1, concat_cross_bev_shape[0], concat_cross_bev_shape[1])
+        concat_cross_bev = F.interpolate(concat_cross_bev, size=bev_spatial_shape, mode='bilinear', align_corners=False)
+        cross_bev_feature = torch.cat([concat_cross_bev, cross_bev_feature], dim=1)
+
+        cross_bev_feature = self.bev_proj(cross_bev_feature.flatten(-2, -1).permute(0, 2, 1))
+        cross_bev_feature = cross_bev_feature.permute(0, 2, 1).contiguous().view(batch_size, -1, bev_spatial_shape[0], bev_spatial_shape[1])
+        query = self._query_embedding.weight[None, ...].repeat(batch_size, 1, 1)
+        query_out = self._tf_decoder(query, keyval)
+
+        trajectory_query, agents_query = query_out.split(self._query_splits, dim=1)
+
+        # Generate all candidates via inference scaling
+        traj_output = self._trajectory_head.forward_inference_scaling(
+            trajectory_query, agents_query, cross_bev_feature,
+            bev_spatial_shape, status_encoding[:, None], global_img=None,
+            num_groups=num_groups,
+        )
+
+        output = {
+            "all_candidates": traj_output["all_candidates"],
+            "confidence_scores": traj_output["confidence_scores"],
+            "coarse_scores": None,
+            "scorer_context": {
+                "bev_feature": cross_bev_feature,
+                "bev_spatial_shape": bev_spatial_shape,
+                "agents_query": agents_query,
+                "ego_query": trajectory_query,
+                "status_encoding": status_encoding[:, None],
+            },
+        }
+        return output
+
 
 class AgentHead(nn.Module):
     """Bounding box prediction head."""
@@ -556,3 +635,77 @@ class TrajectoryHead(nn.Module):
         mode_idx = mode_idx[...,None,None,None].repeat(1,1,self._num_poses,3)
         best_reg = torch.gather(poses_reg, 1, mode_idx).squeeze(1)
         return {"trajectory": best_reg}
+
+    def forward_inference_scaling(self, ego_query, agents_query, bev_feature,
+                                   bev_spatial_shape, status_encoding, global_img,
+                                   num_groups=1) -> Dict[str, torch.Tensor]:
+        """
+        Generate num_groups * ego_fut_mode trajectory candidates and return all
+        candidates with their confidence scores (poses_cls).
+
+        This method mirrors forward_test but replicates the plan anchor num_groups
+        times with independent noise to produce more diverse candidates.
+
+        Args:
+            num_groups: Number of groups to replicate the plan anchor.
+                        Total candidates = num_groups * 20.
+
+        Returns:
+            dict with:
+                - "all_candidates": (B, num_groups*20, 8, 3) all trajectory candidates
+                - "confidence_scores": (B, num_groups*20) classification scores per candidate
+        """
+        step_num = 2
+        bs = ego_query.shape[0]
+        device = ego_query.device
+        self.diffusion_scheduler.set_timesteps(1000, device)
+        step_ratio = 20 / step_num
+        roll_timesteps = (np.arange(0, step_num) * step_ratio).round()[::-1].copy().astype(np.int64)
+        roll_timesteps = torch.from_numpy(roll_timesteps).to(device)
+
+        # 1. Replicate plan anchor for num_groups and add independent truncated noise
+        plan_anchor = self.plan_anchor.unsqueeze(0).unsqueeze(0).repeat(bs, num_groups, 1, 1, 1)
+        plan_anchor = plan_anchor.view(bs, num_groups * self.ego_fut_mode, *plan_anchor.shape[3:])
+        img = self.norm_odo(plan_anchor)
+        noise = torch.randn(img.shape, device=device)
+        trunc_timesteps = torch.ones((bs,), device=device, dtype=torch.long) * 8
+        img = self.diffusion_scheduler.add_noise(original_samples=img, noise=noise, timesteps=trunc_timesteps)
+        ego_fut_mode = img.shape[1]  # num_groups * 20
+
+        for k in roll_timesteps[:]:
+            x_boxes = torch.clamp(img, min=-1, max=1)
+            noisy_traj_points = self.denorm_odo(x_boxes)
+
+            # 2. proj noisy_traj_points to the query
+            traj_pos_embed = gen_sineembed_for_position(noisy_traj_points, hidden_dim=64)
+            traj_pos_embed = traj_pos_embed.flatten(-2)
+            traj_feature = self.plan_anchor_encoder(traj_pos_embed)
+            traj_feature = traj_feature.view(bs, ego_fut_mode, -1)
+
+            timesteps = k
+            if not torch.is_tensor(timesteps):
+                timesteps = torch.tensor([timesteps], dtype=torch.long, device=img.device)
+            elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
+                timesteps = timesteps[None].to(img.device)
+
+            # 3. embed the timesteps
+            timesteps = timesteps.expand(img.shape[0])
+            time_embed = self.time_mlp(timesteps)
+            time_embed = time_embed.view(bs, 1, -1)
+
+            # 4. begin the stacked decoder
+            poses_reg_list, poses_cls_list = self.diff_decoder(traj_feature, noisy_traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding, global_img)
+            poses_reg = poses_reg_list[-1]
+            poses_cls = poses_cls_list[-1]
+            x_start = poses_reg[..., :2]
+            x_start = self.norm_odo(x_start)
+            img = self.diffusion_scheduler.step(
+                model_output=x_start,
+                timestep=k,
+                sample=img
+            ).prev_sample
+
+        return {
+            "all_candidates": poses_reg,      # (B, num_groups*20, 8, 3)
+            "confidence_scores": poses_cls,   # (B, num_groups*20)
+        }

@@ -9,22 +9,25 @@ Metrics: COL, DAC, DDC, TLC, EP, LK, HC, EC.
 Scoring formula:
   (COL × DAC × DDC × TLC) × (5×EP + 2×LK + 2×HC + 2×EC) / 11
 
-COL is a discounted per-timestep TTC-based collision score:
+COL is a discounted per-timestep MTTC-based collision score:
   Σ γ^(t·dt) · score_t / Σ γ^(t·dt)
-  TTC computed via enhanced model: d - V_rel·t - 0.5·a_rel·t² = 0
-  score_t mapped linearly: TTC<=0.5s→0.0, TTC>=3.0s→1.0
+  MTTC computed via 2D bounding-box method (Jiao 2022): geometry-aware,
+  accounts for vehicle shape, orientation, heading-dependent footprint, and acceleration.
+  score_t mapped linearly: MTTC<=0.5s→0.0, MTTC>=3.0s→1.0
   with at-fault logic: not-at-fault→min(score, 0.5)
 """
 
 import math
 import time
 import numpy as np
+import pandas as pd
 import torch
 from typing import Dict, Any, Optional, List
 from shapely.geometry import Polygon, Point
 from scipy.signal import savgol_filter
 
 from bridgesim.evaluation.scorers.base_scorer import BaseTrajectoryScorer
+from bridgesim.evaluation.utils.ttc_2d import compute_mttc_2d
 
 # --- Constants ---
 VEHICLE_LENGTH = 4.515
@@ -185,34 +188,6 @@ class EPDMSEgoTTCScorer(BaseTrajectoryScorer):
             return min(candidates, key=lambda c: c[1])[0]
         return None
 
-    def _get_ego_aabb(self, x: float, y: float) -> tuple:
-        return (x - VEHICLE_HALF_DIAG, y - VEHICLE_HALF_DIAG,
-                x + VEHICLE_HALF_DIAG, y + VEHICLE_HALF_DIAG)
-
-    @staticmethod
-    def _aabb_overlap(a, b) -> bool:
-        return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
-
-    @staticmethod
-    def _compute_ttc(d: float, v_rel: float, a_rel: float) -> float:
-        """Enhanced TTC with constant acceleration model.
-
-        Solves d - v_rel*t - 0.5*a_rel*t^2 = 0 for smallest positive t.
-        """
-        if d <= 0:
-            return 0.0
-        eps = 1e-6
-        if abs(a_rel) < eps:
-            return d / v_rel if v_rel > eps else float('inf')
-        discriminant = v_rel ** 2 + 2 * a_rel * d
-        if discriminant < 0:
-            return float('inf')
-        sqrt_d = math.sqrt(discriminant)
-        t1 = (-v_rel + sqrt_d) / a_rel
-        t2 = (-v_rel - sqrt_d) / a_rel
-        candidates = [t for t in (t1, t2) if t > 0]
-        return min(candidates) if candidates else float('inf')
-
     # ---------------------------------------------------------------
     # Pre-computation
     # ---------------------------------------------------------------
@@ -313,9 +288,7 @@ class EPDMSEgoTTCScorer(BaseTrajectoryScorer):
                 future_heading = heading + heading_rate * dt_future
 
                 ax, ay = future_pos + self.world_to_sim_offset
-                poly = self._get_ego_polygon(float(ax), float(ay), future_heading)
-                aabb = poly.bounds
-                agents_per_t[t].append((poly, aabb, float(ax), float(ay), agent_vel_sim, agent_accel_sim))
+                agents_per_t[t].append((float(ax), float(ay), agent_vel_sim, agent_accel_sim, float(future_heading)))
 
         return agents_per_t
 
@@ -387,9 +360,6 @@ class EPDMSEgoTTCScorer(BaseTrajectoryScorer):
         # Ego polygons and AABBs: create once, reuse for DAC, TLC, NC/TTC
         ego_polys = [self._get_ego_polygon(states['x'][t], states['y'][t], states['heading'][t])
                      for t in range(horizon)]
-        ego_aabbs = [self._get_ego_aabb(states['x'][t], states['y'][t])
-                     for t in range(horizon)]
-
         # Nearby lanes cache
         nearby_cache = {}
 
@@ -429,57 +399,53 @@ class EPDMSEgoTTCScorer(BaseTrajectoryScorer):
                 ego_hx = math.cos(states['heading'][t])
                 ego_hy = math.sin(states['heading'][t])
                 ego_vel = np.array([ego_hx * ego_v, ego_hy * ego_v])
-                # Ego acceleration vector from speed and heading changes
-                if t < horizon - 1:
-                    next_v = states['speed'][t + 1]
-                    next_hx = math.cos(states['heading'][t + 1])
-                    next_hy = math.sin(states['heading'][t + 1])
-                    next_vel = np.array([next_hx * next_v, next_hy * next_v])
-                    ego_accel = (next_vel - ego_vel) / self.planner_dt
+                if t > 0:
+                    ego_accel = (states['speed'][t] - states['speed'][t - 1]) / self.planner_dt
                 else:
-                    ego_accel = np.zeros(2)
+                    ego_accel = 0.0
 
-                ego_aabb = ego_aabbs[t]
-                for agent_poly, agent_aabb, ax, ay, agent_vel, agent_accel in agents_per_t[t]:
-                    if not self._aabb_overlap(ego_aabb, agent_aabb):
-                        continue
-                    # Compute TTC using enhanced model
-                    dx, dy = ax - states['x'][t], ay - states['y'][t]
-                    center_dist = math.sqrt(dx * dx + dy * dy)
-                    d = max(center_dist - 2 * VEHICLE_HALF_DIAG, 0.0)
+                nearby_rows = []
+                nearby_agents = []
+                for ax, ay, agent_vel, agent_accel, agent_heading in agents_per_t[t]:
+                    nearby_rows.append({
+                        'x_i': states['x'][t], 'y_i': states['y'][t],
+                        'vx_i': float(ego_vel[0]), 'vy_i': float(ego_vel[1]),
+                        'hx_i': ego_hx, 'hy_i': ego_hy,
+                        'acc_i': float(ego_accel),
+                        'length_i': VEHICLE_LENGTH, 'width_i': VEHICLE_WIDTH,
+                        'x_j': ax, 'y_j': ay,
+                        'vx_j': float(agent_vel[0]), 'vy_j': float(agent_vel[1]),
+                        'hx_j': math.cos(agent_heading), 'hy_j': math.sin(agent_heading),
+                        'acc_j': float(np.dot(agent_accel, [math.cos(agent_heading), math.sin(agent_heading)])),
+                        'length_j': VEHICLE_LENGTH, 'width_j': VEHICLE_WIDTH,
+                    })
+                    nearby_agents.append((ax, ay))
 
-                    if center_dist < 1e-6:
-                        ttc = 0.0
-                    else:
-                        # Unit vector from ego to agent
-                        ux, uy = dx / center_dist, dy / center_dist
-                        # Relative velocity projected onto ego->agent direction (positive = closing)
-                        v_rel = (ego_vel[0] - agent_vel[0]) * ux + (ego_vel[1] - agent_vel[1]) * uy
-                        # Relative acceleration projected onto same direction
-                        a_rel = (ego_accel[0] - agent_accel[0]) * ux + (ego_accel[1] - agent_accel[1]) * uy
-                        ttc = self._compute_ttc(d, v_rel, a_rel)
-
-                    # Map TTC to score
-                    if ttc >= TTC_SAFE_THRESHOLD:
-                        ttc_score = 1.0
-                    elif ttc <= TTC_DANGER_THRESHOLD:
-                        ttc_score = 0.0
-                    else:
-                        ttc_score = (ttc - TTC_DANGER_THRESHOLD) / ttc_range
-
-                    if ttc_score < step_score:
-                        # At-fault logic
-                        at_fault = True
-                        if ego_v < STOPPED_SPEED_THRESHOLD:
-                            at_fault = False
-                        longitudinal_dist = dx * ego_hx + dy * ego_hy
-                        if longitudinal_dist < -1.0:
-                            at_fault = False
-
-                        if at_fault:
-                            step_score = min(step_score, ttc_score)
+                if nearby_rows:
+                    df = pd.DataFrame(nearby_rows)
+                    mttc_values = compute_mttc_2d(df, 'values')
+                    for idx, (ax, ay) in enumerate(nearby_agents):
+                        mttc = float(mttc_values[idx])
+                        if mttc >= TTC_SAFE_THRESHOLD:
+                            ttc_score = 1.0
+                        elif mttc <= TTC_DANGER_THRESHOLD:
+                            ttc_score = 0.0
                         else:
-                            step_score = min(step_score, max(ttc_score, 0.5))
+                            ttc_score = (mttc - TTC_DANGER_THRESHOLD) / ttc_range
+
+                        if ttc_score < step_score:
+                            at_fault = True
+                            if ego_v < STOPPED_SPEED_THRESHOLD:
+                                at_fault = False
+                            dx, dy = ax - states['x'][t], ay - states['y'][t]
+                            longitudinal_dist = dx * ego_hx + dy * ego_hy
+                            if longitudinal_dist < -1.0:
+                                at_fault = False
+
+                            if at_fault:
+                                step_score = min(step_score, ttc_score)
+                            else:
+                                step_score = min(step_score, max(ttc_score, 0.5))
 
                 col_den += w
                 col_num += w * step_score

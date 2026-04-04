@@ -14,23 +14,11 @@ Reference files:
 - /calibration/train_transfuser_bev_flow.py - flow matching training
 """
 
-import sys
 import torch
 from pathlib import Path
 from typing import Optional
 
-# Add calibration directory to path (evaluation/ is at top level, calibration/ is sibling)
-CALIBRATION_DIR = Path(__file__).resolve().parent.parent.parent / "calibration"
-if str(CALIBRATION_DIR) not in sys.path:
-    sys.path.insert(0, str(CALIBRATION_DIR))
-
-try:
-    from train_transfuser_bev_flow import FlowMatchingLit
-except ImportError as e:
-    raise ImportError(
-        f"Cannot import FlowMatchingLit from train_transfuser_bev_flow. "
-        f"Make sure calibration directory exists at {CALIBRATION_DIR}"
-    ) from e
+from bridgesim.calibration.transfuser_bev_flow_lit import FlowMatchingLit
 
 
 class TransfuserBEVCalibrator:

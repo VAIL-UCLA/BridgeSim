@@ -58,16 +58,24 @@ class RAPAdapter(BaseModelAdapter):
                        from the live MetaDrive environment state
     """
 
-    def __init__(self, checkpoint_path: str, image_source: str = "metadrive", **kwargs):
+    def __init__(self, checkpoint_path: str, image_source: str = "metadrive",
+                 scorer=None, num_proposals: int = None, **kwargs):
         """
         Initialize RAP adapter.
 
         Args:
             checkpoint_path: Path to checkpoint (.ckpt file)
             image_source: 'rasterized', 'metadrive', or 'rasterized_3d'
+            scorer: Optional BaseTrajectoryScorer instance for candidate selection.
+                    When set, returns all proposals for external scoring.
+            num_proposals: If set, truncate candidates to the first num_proposals
+                           before passing to the scorer.
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.image_source = image_source
+        self.scorer = scorer
+        self.num_proposals = num_proposals
+        self._current_frame_id = 0
         self.config = None
         self.lidar2img_tensor = None
         self.img_shape_tensor = None
@@ -305,6 +313,8 @@ class RAPAdapter(BaseModelAdapter):
                      scenario_data: Dict[str, Any],
                      frame_id: int) -> Any:
         """Prepare input for RAP model."""
+        self._current_frame_id = frame_id
+
         # 1. Preprocess images
         img_tensor = self._preprocess_images(images).unsqueeze(0).to(self.device)
 
@@ -349,16 +359,63 @@ class RAPAdapter(BaseModelAdapter):
     def run_inference(self, model_input: Any) -> Any:
         """Run RAP model inference."""
         with torch.no_grad():
-            output = self.model(model_input, targets=None)
+            if self.scorer is not None:
+                output = self.model(model_input, targets=None, return_score=True)
+                # Truncate to first num_proposals candidates
+                if self.num_proposals is not None:
+                    k = self.num_proposals
+                    total = output["trajectory"].shape[1]
+                    output["trajectory"] = output["trajectory"][:, :k]
+                    output["score"] = output["score"][:, :k]
+                    print(f"[RAP] Truncated proposals: {total} -> {k}")
+            elif self.num_proposals is not None:
+                # No scorer but num_proposals set: get all proposals, truncate,
+                # then use model's own scores to select best from truncated set
+                output = self.model(model_input, targets=None, return_score=True)
+                k = self.num_proposals
+                total = output["trajectory"].shape[1]
+                proposals = output["trajectory"][:, :k]  # (B, k, T, 3)
+                scores = output["score"][:, :k]  # (B, k)
+                best_idx = torch.argmax(scores, dim=1)  # (B,)
+                batch_size = proposals.shape[0]
+                output["trajectory"] = proposals[torch.arange(batch_size), best_idx]  # (B, T, 3)
+                print(f"[RAP] Truncated proposals (no scorer): {total} -> {k}")
+            else:
+                output = self.model(model_input, targets=None)
         return output
 
     def parse_output(self, model_output: Any, ego_state: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Parse RAP output."""
-        # Trajectory shape: (B, M, T, 2) -> Select best mode
-        # Usually 'trajectory' key in output contains the selected best proposal
-        pred_traj_full = model_output["trajectory"][0].cpu().numpy()  # Shape might be (T, 2) or (T, 3)
+        if self.scorer is not None:
+            # return_score=True: trajectory is all proposals (B, 64, T, 3)
+            # Wrap as all_candidates for scorer
+            all_proposals = model_output["trajectory"]  # (B, 64, T, 3)
+            scorer_input = {"all_candidates": all_proposals}
+            result = self.scorer.select_best(
+                scorer_input,
+                ego_state=ego_state,
+                frame_idx=self._current_frame_id,
+            )
+            trajectory = result["trajectory"][0].cpu().numpy()  # (T, 3)
+            traj_swapped = np.column_stack([trajectory[:, 1], trajectory[:, 0]])
+            parsed = {
+                'trajectory': traj_swapped,
+                'best_idx': result["best_idx"][0].item(),
+                'num_candidates': all_proposals.shape[1],
+            }
 
-        print(f"[RAP DEBUG] Raw trajectory: {pred_traj_full[:3]}...")  # First 3 points
+            # Include all candidates and scores for visualization
+            all_cands = all_proposals[0].cpu().numpy()  # (64, T, 3)
+            cands_swapped = np.stack([
+                np.column_stack([c[:, 1], c[:, 0]]) for c in all_cands
+            ])
+            parsed['trajectory_coarse'] = cands_swapped
+            parsed['coarse_scores'] = result["scores"][0].cpu().numpy()
+
+            return parsed
+
+        # Default: single trajectory from argmax selection
+        pred_traj_full = model_output["trajectory"][0].cpu().numpy()
 
         # RAP outputs [forward, lateral, heading]
         # Swap columns: [forward, lateral] -> [lateral, forward]
@@ -366,8 +423,6 @@ class RAPAdapter(BaseModelAdapter):
             pred_traj_local = np.column_stack([pred_traj_full[:, 1], pred_traj_full[:, 0]])
         else:
             pred_traj_local = pred_traj_full
-
-        print(f"[RAP DEBUG] Swapped trajectory: {pred_traj_local[:3]}...")  # First 3 points
 
         return {'trajectory': pred_traj_local}
 

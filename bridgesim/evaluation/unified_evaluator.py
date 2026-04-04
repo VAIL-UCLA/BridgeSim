@@ -8,6 +8,21 @@ import os
 import sys
 from pathlib import Path
 
+# Initialize CUDA device BEFORE any imports that might use CUDA
+if 'CUDA_VISIBLE_DEVICES' in os.environ:
+    try:
+        from cuda import cudart
+        # cudaSetDevice returns a tuple (error_code, )
+        err, = cudart.cudaSetDevice(0)
+        if err == cudart.cudaError_t.cudaSuccess:
+            print("[Early init] CUDA runtime device set to 0")
+        else:
+            print(f"[Early init] Warning: Failed to set CUDA runtime device: {err}")
+    except Exception as e:
+        # Pass silently if cuda-python is not installed or other errors occur
+        # The main code will handle device placement via PyTorch
+        pass
+
 # Add evaluation to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -58,7 +73,7 @@ def create_trajectory_scorer(args):
 
     elif scorer_name == "epdms_ego_v1":
         from bridgesim.evaluation.scorers import EPDMSEgoScorerV1
-        print("Creating EPDMSEgoScorerV1 with plan continuity (will be initialized after env setup)")
+        print("Creating EPDMSEgoScorerV1 (will be initialized after env setup)")
         return EPDMSEgoScorerV1()
 
     elif scorer_name == "epdms_ego_ttc":
@@ -71,25 +86,35 @@ def create_trajectory_scorer(args):
         print("Creating EPDMSEgoAdaptiveColScorer (will be initialized after env setup)")
         return EPDMSEgoAdaptiveColScorer()
 
-    elif scorer_name == "epdms_ego_ttc_softcol":
-        from bridgesim.evaluation.scorers import EPDMSEgoTTCSoftColScorer
-        print("Creating EPDMSEgoTTCSoftColScorer (will be initialized after env setup)")
-        return EPDMSEgoTTCSoftColScorer()
+    elif scorer_name == "epdms_ego_adaptive_col_only":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_only_scorer import EPDMSEgoAdaptiveColOnlyScorer
+        print("Creating EPDMSEgoAdaptiveColOnlyScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveColOnlyScorer()
 
-    elif scorer_name == "epdms_ego_ttc_softcol_softdac":
-        from bridgesim.evaluation.scorers import EPDMSEgoTTCSoftColSoftDACScorer
-        print("Creating EPDMSEgoTTCSoftColSoftDACScorer (will be initialized after env setup)")
-        return EPDMSEgoTTCSoftColSoftDACScorer()
+    elif scorer_name == "epdms_ego_adaptive_col_map":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_scorer import EPDMSEgoAdaptiveColMapScorer
+        print("Creating EPDMSEgoAdaptiveColMapScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveColMapScorer()
 
-    elif scorer_name == "epdms_ego_ttc_2":
-        from bridgesim.evaluation.scorers import EPDMSEgoTTC2Scorer
-        print("Creating EPDMSEgoTTC2Scorer (will be initialized after env setup)")
-        return EPDMSEgoTTC2Scorer()
+    elif scorer_name == "epdms_ego_adaptive_col_map_comfort":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_col_map_comfort_scorer import EPDMSEgoAdaptiveColMapComfortScorer
+        print("Creating EPDMSEgoAdaptiveColMapComfortScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveColMapComfortScorer()
 
-    elif scorer_name == "epdms_ego_ttc_3":
-        from bridgesim.evaluation.scorers import EPDMSEgoTTC3Scorer
-        print("Creating EPDMSEgoTTC3Scorer (will be initialized after env setup)")
-        return EPDMSEgoTTC3Scorer()
+    elif scorer_name == "epdms_ego_adaptive_comfort_only":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_only_scorer import EPDMSEgoAdaptiveComfortOnlyScorer
+        print("Creating EPDMSEgoAdaptiveComfortOnlyScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveComfortOnlyScorer()
+
+    elif scorer_name == "epdms_ego_adaptive_comfort_map":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_map_scorer import EPDMSEgoAdaptiveComfortMapScorer
+        print("Creating EPDMSEgoAdaptiveComfortMapScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveComfortMapScorer()
+
+    elif scorer_name == "epdms_ego_adaptive_comfort_col":
+        from bridgesim.evaluation.scorers.epdms_ego_adaptive_comfort_col_scorer import EPDMSEgoAdaptiveComfortColScorer
+        print("Creating EPDMSEgoAdaptiveComfortColScorer (will be initialized after env setup)")
+        return EPDMSEgoAdaptiveComfortColScorer()
 
     else:
         raise ValueError(f"Unknown trajectory scorer: {scorer_name}")
@@ -155,9 +180,12 @@ def create_model_adapter(args):
 
     elif model_type == "rap":
         from bridgesim.evaluation.models.rap_adapter import RAPAdapter
+        scorer = create_trajectory_scorer(args)
         return RAPAdapter(
             checkpoint_path=args.checkpoint,
-            image_source=args.image_source
+            image_source=args.image_source,
+            scorer=scorer,
+            num_proposals=args.num_proposals,
         )
 
     elif model_type == "lead":
@@ -168,13 +196,16 @@ def create_model_adapter(args):
 
     elif model_type == "drivor":
         from bridgesim.evaluation.models.drivor_adapter import DrivoRAdapter
+        scorer = create_trajectory_scorer(args)
         return DrivoRAdapter(
             checkpoint_path=args.checkpoint,
             config_path=args.config,
             num_cameras=args.num_cameras,
             image_size=tuple(args.image_size) if args.image_size else (512, 288),
             num_poses=args.num_poses,
-            use_lidar=args.use_lidar
+            use_lidar=args.use_lidar,
+            scorer=scorer,
+            num_proposals=args.num_proposals,
         )
 
     elif model_type == "transfuser":
@@ -201,6 +232,7 @@ def create_model_adapter(args):
             plan_anchor_path=args.plan_anchor_path,
             scorer=scorer,
             num_groups=num_groups,
+            num_proposals=args.num_proposals,
             bev_calibrator=bev_calibrator,
         )
 
@@ -213,6 +245,7 @@ def create_model_adapter(args):
             plan_anchor_path=args.plan_anchor_path,
             scorer=scorer,
             num_groups=num_groups,
+            num_proposals=args.num_proposals,
             bev_calibrator=bev_calibrator,
             enable_temporal_consistency=args.enable_temporal_consistency,
             temporal_alpha=args.temporal_alpha,
@@ -225,27 +258,6 @@ def create_model_adapter(args):
     elif model_type == "lead_navsim":
         from bridgesim.evaluation.models.lead_navsim_adapter import LEADNavsimAdapter
         return LEADNavsimAdapter(checkpoint_path=args.checkpoint)
-
-    elif model_type == "openpilot":
-        from bridgesim.evaluation.models.openpilot_adapter import OpenPilotAdapter
-        return OpenPilotAdapter(checkpoint_path=args.checkpoint)
-
-    elif model_type == "alpamayo_r1":
-        from bridgesim.evaluation.models.alpamayo_r1_adapter import AlpamayoR1Adapter
-        scorer = create_trajectory_scorer(args)
-        num_groups = args.num_groups if args.num_groups is not None else (1 if scorer is None else 1)
-        return AlpamayoR1Adapter(
-            checkpoint_path=args.checkpoint,
-            alp_python=args.alp_python,
-            alp_script=args.alp_script,
-            coord_mode=args.alp_coord_mode,
-            top_p=args.alp_top_p,
-            temperature=args.alp_temperature,
-            num_traj_samples=args.alp_num_traj_samples,
-            max_generation_length=args.alp_max_generation_length,
-            scorer=scorer,
-            num_groups=num_groups,
-        )
 
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -263,7 +275,7 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
         help="Model type to evaluate"
     )
     parser.add_argument(
@@ -287,7 +299,6 @@ def main():
         choices=["only_ctrl", "only_traj", "merge_ctrl_traj"],
         help="TCP planner type (only used for TCP model)"
     )
-    
     parser.add_argument(
         "--image-source",
         type=str,
@@ -307,7 +318,7 @@ def main():
         "--trajectory-scorer",
         type=str,
         default=None,
-        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego", "epdms_ego_v1", "epdms_ego_ttc", "epdms_ego_adaptive_col", "epdms_ego_ttc_softcol", "epdms_ego_ttc_softcol_softdac", "epdms_ego_ttc_2", "epdms_ego_ttc_3"],
+        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego", "epdms_ego_v1", "epdms_ego_ttc", "epdms_ego_adaptive_col", "epdms_ego_adaptive_col_only", "epdms_ego_adaptive_col_map", "epdms_ego_adaptive_col_map_comfort", "epdms_ego_adaptive_comfort_only", "epdms_ego_adaptive_comfort_map", "epdms_ego_adaptive_comfort_col"],
         help="Trajectory scorer for inference scaling (for DiffusionDrive/V2). "
              "'confidence' uses poses_cls (v1 only). "
              "'coarse_topk' uses v2 learned coarse scorer (v1 needs --v2-scorer-checkpoint). "
@@ -322,37 +333,19 @@ def main():
              "(default: 1 for v1, 10 for v2)"
     )
     parser.add_argument(
+        "--num-proposals",
+        type=int,
+        default=None,
+        help="Truncate candidates to the first num_proposals before scoring. "
+             "Used to study the effect of different numbers of proposals."
+    )
+    parser.add_argument(
         "--v2-scorer-checkpoint",
         type=str,
         default=None,
         help="Path to DiffusionDrive v2 checkpoint for loading coarse scorer weights. "
              "Required when using --trajectory-scorer coarse_topk with DiffusionDrive v1."
     )
-
-    # AlpamayoR1 external-env parameters
-    parser.add_argument(
-        "--alp-python",
-        type=str,
-        default=os.environ.get("ALPAMAYO_PYTHON", ""),
-        help="Path to Alpamayo venv python. If empty, adapter will try sibling layout or env var ALPAMAYO_PYTHON."
-    )
-    parser.add_argument(
-        "--alp-script",
-        type=str,
-        default=os.environ.get("ALPAMAYO_SCRIPT", ""),
-        help="Path to BridgeSim Alpamayo glue script (tools/bridgesim_infer_once.py). Optional."
-    )
-    parser.add_argument(
-        "--alp-coord-mode",
-        type=str,
-        default="x_forward_y_left",
-        choices=["x_forward_y_left", "x_forward_y_right", "x_right_y_forward", "x_left_y_forward"],
-        help="Coordinate mapping for Alpamayo trajectory conversion."
-    )
-    parser.add_argument("--alp-top-p", type=float, default=0.98)
-    parser.add_argument("--alp-temperature", type=float, default=0.6)
-    parser.add_argument("--alp-num-traj-samples", type=int, default=20)
-    parser.add_argument("--alp-max-generation-length", type=int, default=256)
 
     # Temporal consistency parameters (for DiffusionDriveV2)
     parser.add_argument(
@@ -544,13 +537,12 @@ def main():
              "Total frames = min(ego_replay_frames + eval_frames, scenario_length)"
     )
     parser.add_argument(
-        "--eval-metrics",
+        "--scorer-type",
         type=str,
-        default="pdms",
-        choices=["pdms", "epdms"],
-        help="Scoring metric set to use (default: pdms). "
-             "'pdms' excludes Extended Comfort (EC). "
-             "'epdms' includes all metrics including EC."
+        default="legacy",
+        choices=["legacy", "navsim"],
+        help="Scorer type for closed_loop mode (default: legacy). "
+             "'navsim' uses NavSim-style EPDMS scoring with per-frame metrics."
     )
     parser.add_argument(
         "--score-start-frame",
@@ -597,19 +589,15 @@ def main():
     if args.trajectory_scorer:
         ng = args.num_groups if args.num_groups is not None else (1 if args.model_type == "diffusiondrive" else 10)
         output_subdir += f"_scorer_{args.trajectory_scorer}_ng{ng}"
+        if args.num_proposals is not None:
+            output_subdir += f"_np{args.num_proposals}"
     if args.enable_temporal_consistency:
         output_subdir += f"_ta{args.temporal_alpha}_th{args.temporal_max_history}"
     full_output_dir = os.path.join(args.output_dir, output_subdir)
 
     # Create evaluator
     print("Creating evaluator...")
-
-    EvaluatorClass = BaseEvaluator
-    if args.model_type.lower() == "alpamayo_r1":
-        from bridgesim.evaluation.utils.alpamayo_overlay import AlpamayoEvaluator
-        EvaluatorClass = AlpamayoEvaluator
-
-    evaluator = EvaluatorClass(
+    evaluator = BaseEvaluator(
         model_adapter=model_adapter,
         scenario_path=args.scenario_path,
         output_dir=full_output_dir,
@@ -622,8 +610,8 @@ def main():
         sim_dt=args.sim_dt,
         ego_replay_frames=args.ego_replay_frames,
         eval_frames=args.eval_frames,
+        scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
-        eval_metrics=args.eval_metrics,
     )
 
     # Run evaluation

@@ -46,6 +46,7 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         consensus_temperature: float = 1.0,
         scorer=None,
         num_groups: int = 10,
+        num_proposals: int = None,
         **kwargs
     ):
         """
@@ -67,6 +68,8 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
                     When set, uses forward_inference_scaling instead of regular forward.
             num_groups: Number of groups for trajectory candidate generation.
                         Total candidates = num_groups * 20. Only used when scorer is set.
+            num_proposals: If set, truncate candidates to the first num_proposals
+                           before passing to the scorer.
         """
         super().__init__(checkpoint_path, config_path=None, **kwargs)
         self.config = None
@@ -74,6 +77,7 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         self.bev_calibrator = bev_calibrator
         self.scorer = scorer
         self.num_groups = num_groups
+        self.num_proposals = num_proposals
         self._current_frame_id = 0
 
         # Temporal consistency parameters
@@ -138,7 +142,7 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """DiffusionDriveV2 uses 3 cameras (left, front, right) stitched together."""
-        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
+        return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0', 'CAM_THIRD_PERSON')}
 
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
@@ -260,6 +264,36 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
                     num_groups=self.num_groups,
                     use_bev_calibrator=use_bev_calibrator,
                 )
+                # Truncate to first num_proposals candidates
+                if self.num_proposals is not None:
+                    k = self.num_proposals
+                    total = output["all_candidates"].shape[1]
+                    output["all_candidates"] = output["all_candidates"][:, :k]
+                    if output.get("confidence_scores") is not None:
+                        output["confidence_scores"] = output["confidence_scores"][:, :k]
+                    if output.get("coarse_scores") is not None:
+                        output["coarse_scores"] = output["coarse_scores"][:, :k]
+                    print(f"[DDv2] Truncated proposals: {total} -> {k}")
+            elif self.num_proposals is not None:
+                # No scorer but num_proposals set: get all candidates, truncate,
+                # then use model's own scores to select best from truncated set
+                output = self.model.forward_inference_scaling(
+                    model_input,
+                    num_groups=self.num_groups,
+                    use_bev_calibrator=use_bev_calibrator,
+                )
+                k = self.num_proposals
+                total = output["all_candidates"].shape[1]
+                candidates = output["all_candidates"][:, :k]  # (B, k, 8, 3)
+                scores = output.get("coarse_scores")
+                if scores is not None:
+                    scores = scores[:, :k]  # (B, k)
+                    best_idx = torch.argmax(scores, dim=1)  # (B,)
+                else:
+                    best_idx = torch.zeros(candidates.shape[0], dtype=torch.long, device=candidates.device)
+                batch_size = candidates.shape[0]
+                output["trajectory"] = candidates[torch.arange(batch_size), best_idx]  # (B, 8, 3)
+                print(f"[DDv2] Truncated proposals (no scorer): {total} -> {k}")
             elif self.enable_temporal_consistency:
                 output = self.model.forward_temporal(
                     model_input,

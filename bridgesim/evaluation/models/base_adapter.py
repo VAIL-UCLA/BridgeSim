@@ -144,8 +144,8 @@ class BaseModelAdapter(ABC):
             'CAM_BACK': {'x': -2.0, 'y': 0.0, 'z': 1.60, 'yaw': 180.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 110, 'width': 1600, 'height': 900},
             'CAM_BACK_LEFT': {'x': -0.32, 'y': -0.55, 'z': 1.60, 'yaw': -110.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1600, 'height': 900},
             'CAM_BACK_RIGHT': {'x': -0.32, 'y': 0.55, 'z': 1.60, 'yaw': 110.0, 'pitch': 0.0, 'roll': 0.0, 'fov': 70, 'width': 1600, 'height': 900},
-            # # Third-person view camera: 3m behind ego, elevated, facing forward
-            # 'CAM_THIRD_PERSON': {'x': -8.0, 'y': 0.0, 'z': 3.0, 'yaw': 0.0, 'pitch': -15.0, 'roll': 0.0, 'fov': 70, 'width': 1600, 'height': 900},
+            # Third-person view camera: 3m behind ego, elevated, facing forward
+            'CAM_THIRD_PERSON': {'x': -8.0, 'y': 0.0, 'z': 3.0, 'yaw': 0.0, 'pitch': -15.0, 'roll': 0.0, 'fov': 70, 'width': 900, 'height': 900},
         }
 
     def save_intermediate_outputs(self, model_output: Any, output_path: str):
