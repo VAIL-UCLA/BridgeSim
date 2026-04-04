@@ -1,10 +1,10 @@
-# BridgeSim: Closed-Loop Evaluation for End-to-End Autonomous Driving
+# BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving
 
 [![website](https://img.shields.io/badge/Website-Explore%20Now-blueviolet?style=flat&logo=google-chrome)](https://vail-ucla.github.io/BridgeSim/)
 [![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 [![huggingface](https://img.shields.io/badge/HuggingFace-Checkpoints-yellow?logo=huggingface)](https://huggingface.co/sethzhao506ucla/BridgeSim)
 
-[Seth Z. Zhao*](#)<sup>1</sup>, [Luobin Wang*](#)<sup>2</sup>, [Hongwei Ruan](#)<sup>2</sup>, [Yuxin Bao](#)<sup>1</sup>, [Yilan Chen](#)<sup>2</sup>, [Ziyang Leng](#)<sup>1</sup>, [Abhijit Ravichandran](#)<sup>2</sup>, [Honglin He](#)<sup>1</sup>, [Zewei Zhou](#)<sup>1</sup>, [Xu Han](#)<sup>1</sup>, [Abhishek Peri](#)<sup>3</sup>, [Zhiyu Huang](#)<sup>1</sup>, [Pranav Desai](#)<sup>3</sup>, [Henrik Christensen](#)<sup>2</sup>, [Jiaqi Ma](#)<sup>1</sup>, [Bolei Zhou](#)<sup>1</sup>†
+[Seth Z. Zhao*](https://sethzhao506.github.io)<sup>1</sup>, [Luobin Wang*](https://scholar.google.com/citations?user=rbmtcYsAAAAJ&hl=en)<sup>2</sup>, [Hongwei Ruan](https://www.linkedin.com/in/hongwei-ruan/)<sup>2</sup>, [Yuxin Bao](www.linkedin.com/in/rebecca-bao-c13752hz)<sup>1</sup>, [Yilan Chen](https://yilanchen6.github.io)<sup>2</sup>, [Ziyang Leng](https://scholar.google.com/citations?user=Lwz4be0AAAAJ&hl=en)<sup>1</sup>, [Abhijit Ravichandran](https://www.linkedin.com/in/rabhijit/)<sup>2</sup>, [Honglin He](https://dhlinv.github.io)<sup>1</sup>, [Zewei Zhou](https://scholar.google.com/citations?user=TzhyHbYAAAAJ&hl=zh-CN)<sup>1</sup>, [Xu Han](https://scholar.google.com/citations?user=Ndgk55IAAAAJ&hl=en)<sup>1</sup>, [Abhishek Peri](https://www.linkedin.com/in/abhishek-peri/)<sup>3</sup>, [Zhiyu Huang](https://mczhi.github.io)<sup>1</sup>, [Pranav Desai](https://www.linkedin.com/in/pndesai2/)<sup>3</sup>, [Henrik Christensen](https://scholar.google.com/citations?user=MA8rI0MAAAAJ&hl=en)<sup>2</sup>, [Jiaqi Ma](https://mobility-lab.seas.ucla.edu/about/)<sup>1</sup>, [Bolei Zhou](https://boleizhou.github.io/)<sup>1</sup>†
 
 <sup>1</sup>UCLA &nbsp;&nbsp; <sup>2</sup>UCSD &nbsp;&nbsp; <sup>3</sup>Qualcomm
 
@@ -13,11 +13,11 @@
 <!-- TODO: add teaser image -->
 <!-- ![teaser](assets/bridgesim_teaser.png) -->
 
-BridgeSim is a closed-loop cross-dataset evaluation platform for end-to-end autonomous driving models, built on the [MetaDrive](https://github.com/metadriverse/metadrive) simulator. It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more). BridgeSim provides a unified evaluation interface that bridges the gap between training-time datasets and deployment-time environments, enabling fair and reproducible benchmarking across diverse driving scenarios.
+BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end autonomous driving policies, built on the [MetaDrive](https://github.com/metadriverse/metadrive) simulator. It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more). BridgeSim provides a unified evaluation interface that bridges the gap between training-time datasets and deployment-time environments, enabling fair and reproducible benchmarking across diverse driving scenarios.
 
 ## News
 
-- **`2025/XX`**: Initial BridgeSim codebase release.
+- **`2026/04`**: BridgeSim paper and codebase release.
 
 ## ✅ Currently Supported Features
 
@@ -228,15 +228,6 @@ The codebase is built upon [MetaDrive](https://github.com/metadriverse/metadrive
 ## Citation
 
 If you find this repository useful for your research, please consider giving us a star 🌟 and citing our paper.
-
-```bibtex
-@article{bridgesim2025,
-  title={BridgeSim: Closed-Loop Evaluation for End-to-End Autonomous Driving},
-  author={TODO},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
-  year={2025}
-}
-```
 
 ## License
 
