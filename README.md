@@ -4,9 +4,9 @@
 [![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 [![huggingface](https://img.shields.io/badge/HuggingFace-Checkpoints-yellow?logo=huggingface)](https://huggingface.co/sethzhao506ucla/BridgeSim)
 
-[Seth Z. Zhao*](#)$^1$, [Luobin Wang*](#)$^2$, [Hongwei Ruan](#)$^2$, [Yuxin Bao](#)$^1$, [Yilan Chen](#)$^2$, [Ziyang Leng](#)$^1$, [Abhijit Ravichandran](#)$^2$, [Honglin He](#)$^1$, [Zewei Zhou](#)$^1$, [Xu Han](#)$^1$, [Abhishek Peri](#)$^3$, [Zhiyu Huang](#)$^1$, [Pranav Desai](#)$^3$, [Henrik Christensen](#)$^2$, [Jiaqi Ma](#)$^1$, [Bolei Zhou](#)$^{1}$†
+[Seth Z. Zhao*](#)<sup>1</sup>, [Luobin Wang*](#)<sup>2</sup>, [Hongwei Ruan](#)<sup>2</sup>, [Yuxin Bao](#)<sup>1</sup>, [Yilan Chen](#)<sup>2</sup>, [Ziyang Leng](#)<sup>1</sup>, [Abhijit Ravichandran](#)<sup>2</sup>, [Honglin He](#)<sup>1</sup>, [Zewei Zhou](#)<sup>1</sup>, [Xu Han](#)<sup>1</sup>, [Abhishek Peri](#)<sup>3</sup>, [Zhiyu Huang](#)<sup>1</sup>, [Pranav Desai](#)<sup>3</sup>, [Henrik Christensen](#)<sup>2</sup>, [Jiaqi Ma](#)<sup>1</sup>, [Bolei Zhou](#)<sup>1</sup>†
 
-$^1$UCLA &nbsp;&nbsp; $^2$UCSD &nbsp;&nbsp; $^3$Qualcomm
+<sup>1</sup>UCLA &nbsp;&nbsp; <sup>2</sup>UCSD &nbsp;&nbsp; <sup>3</sup>Qualcomm
 
 \* Equal contribution &nbsp;&nbsp; † Corresponding author
 
