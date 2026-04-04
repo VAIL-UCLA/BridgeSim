@@ -1,9 +1,14 @@
 # BridgeSim: Closed-Loop Evaluation for End-to-End Autonomous Driving
 
+[![website](https://img.shields.io/badge/Website-Explore%20Now-blueviolet?style=flat&logo=google-chrome)](https://vail-ucla.github.io/BridgeSim/)
 [![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 [![huggingface](https://img.shields.io/badge/HuggingFace-Checkpoints-yellow?logo=huggingface)](https://huggingface.co/sethzhao506ucla/BridgeSim)
 
-<!-- TODO: add author list -->
+[Seth Z. Zhao*](#)$^1$, [Luobin Wang*](#)$^2$, [Hongwei Ruan](#)$^2$, [Yuxin Bao](#)$^1$, [Yilan Chen](#)$^2$, [Ziyang Leng](#)$^1$, [Abhijit Ravichandran](#)$^2$, [Honglin He](#)$^1$, [Zewei Zhou](#)$^1$, [Xu Han](#)$^1$, [Abhishek Peri](#)$^3$, [Zhiyu Huang](#)$^1$, [Pranav Desai](#)$^3$, [Henrik Christensen](#)$^2$, [Jiaqi Ma](#)$^1$, [Bolei Zhou](#)$^{1}$†
+
+$^1$UCLA &nbsp;&nbsp; $^2$UCSD &nbsp;&nbsp; $^3$Qualcomm
+
+\* Equal contribution &nbsp;&nbsp; † Corresponding author
 
 <!-- TODO: add teaser image -->
 <!-- ![teaser](assets/bridgesim_teaser.png) -->
@@ -16,12 +21,12 @@ BridgeSim is a closed-loop cross-dataset evaluation platform for end-to-end auto
 
 ## ✅ Currently Supported Features
 
-- [x] Closed-loop evaluation of NavSim models (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR) on multiple datasets
-- [x] Closed-loop evaluation of Bench2Drive models (UniAD, VAD) on multiple datasets
-- [x] Closed-loop evaluation of RAP on multiple datasets
-- [x] Scenario conversion from OpenScene / NavSim, Bench2Drive, nuScenes, and Waymo to ScenarioNet format
-- [x] Open-loop and closed-loop evaluation modes
-- [x] Configurable traffic modes: `no_traffic`, `log_replay`, `IDM`
+- [√] Closed-loop evaluation of NavSim models (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR) on multiple datasets
+- [√] Closed-loop evaluation of Bench2Drive models (UniAD, VAD) on multiple datasets
+- [√] Closed-loop evaluation of RAP on multiple datasets
+- [√] Scenario conversion from OpenScene / NavSim, Bench2Drive, nuScenes, and Waymo to ScenarioNet format
+- [√] Open-loop and closed-loop evaluation modes
+- [√] Configurable traffic modes: `no_traffic`, `log_replay`, `IDM`
 
 ## Data Preparation
 
@@ -119,6 +124,13 @@ pip install -e .
 > ln -s /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so /usr/lib/dri/swrast_dri.so
 > ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.30 $(conda info --base)/envs/mdsn/lib/libstdc++.so.6
 > ```
+
+> **Note (Panda3D model paths):** If Panda3D cannot find pedestrian or traffic cone models, register them manually (replace `<ENV>` with your conda env name, e.g. `mdsn`, `b2d`, or `rap`):
+> ```bash
+> echo "model-path /path/to/metadrive/metadrive/assets/models/pedestrian" >> /opt/conda/envs/<ENV>/lib/python3.9/site-packages/panda3d/etc/Config.prc
+> echo "model-path /path/to/metadrive/metadrive/assets/models/traffic_cone" >> /opt/conda/envs/<ENV>/lib/python3.9/site-packages/panda3d/etc/Config.prc
+> ```
+
 
 #### Bench2Drive models (UniAD, VAD)
 
