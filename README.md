@@ -220,6 +220,8 @@ ckpts/BridgeSim/
 | RAP | NavSim v2 | `rap` |
 | LEAD (NavSim) | NavSim v2 | `lead_navsim` |
 | EgoMLP | NavSim v2 | `ego_mlp` |
+| OpenPilot | comma.ai | `openpilot` |
+| Alpamayo-R1 | Nvidia | `alpamayo_r1` |
 
 ## Acknowledgement
 
