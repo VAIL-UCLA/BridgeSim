@@ -193,16 +193,6 @@ ckpts/BridgeSim/
     └── ego_status_mlp/
 ```
 
-## Tutorials
-
-- [Tutorial of NavSim Model Evaluation (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR)](docs/Tutorial_NavSim_Evaluation.md)
-- [Tutorial of Bench2Drive Model Evaluation (UniAD, VAD)](docs/Tutorial_Bench2Drive_Evaluation.md)
-- [Tutorial of RAP Evaluation](docs/Tutorial_RAP_Evaluation.md)
-- [Tutorial of Batch Evaluation](docs/Tutorial_Batch_Evaluation.md)
-- [Evaluator Key Options Reference](docs/Tutorial_Evaluator_Options.md)
-
-For batch evaluation over many scenarios, see `scripts/evaluator/run_batch_eval.sh`.
-
 ### Key evaluator options
 
 | Option | Default | Description |
