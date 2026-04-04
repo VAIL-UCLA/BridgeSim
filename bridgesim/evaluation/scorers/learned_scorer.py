@@ -6,17 +6,26 @@ from collections import OrderedDict
 from bridgesim.evaluation.scorers.base_scorer import BaseTrajectoryScorer
 
 
-class CoarseTopKScorer(BaseTrajectoryScorer):
+class LearnedScorer(BaseTrajectoryScorer):
     """
-    Scorer that replicates the full v2 forward_test_rl scoring pipeline
-    (lines 1805-1859):
+    Learned two-stage trajectory scorer for inference scaling.
 
-        _get_scorer_inputs → coarse scorer_decoder → score heads →
-        topk(32) → fine_scorer_decoder (3 layers) → fine score heads →
-        per-layer argmax → map back to global idx → traj_to_score[:, -1]
+    Implements a coarse-to-fine selection pipeline:
+      1. Coarse stage: scores all N candidates with a lightweight transformer
+         decoder and per-metric prediction heads (NC, EP, DAC, TTC, Comfort).
+         Retains the top-K candidates (default K=32).
+      2. Fine stage: re-scores the top-K candidates with a deeper transformer
+         decoder (3 layers) and finer-grained prediction heads. The candidate
+         with the highest fine score is returned as the final trajectory.
 
-    For DiffusionDrive v2: uses pre-computed coarse_scores from model output.
-    For DiffusionDrive v1: loads all v2 scorer modules from a v2 checkpoint.
+    The scorer weights are learned jointly with the planning model and encode
+    implicit knowledge of safe and efficient driving behavior without requiring
+    ground-truth scenario data at inference time.
+
+    When used with a model that already outputs pre-computed coarse scores,
+    those scores are reused directly to skip the coarse stage. When used with
+    a model that does not support this, scorer weights are loaded from a
+    separate checkpoint.
     """
 
     V2_WEIGHT_PREFIX = "_trajectory_head."
@@ -107,7 +116,7 @@ class CoarseTopKScorer(BaseTrajectoryScorer):
         })
 
         # Load weights
-        print(f"[CoarseTopKScorer] Loading scorer weights from: {ckpt_path}")
+        print(f"[LearnedScorer] Loading scorer weights from: {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location="cpu")
         state_dict = ckpt.get("state_dict", ckpt)
 
@@ -126,15 +135,15 @@ class CoarseTopKScorer(BaseTrajectoryScorer):
 
         missing, unexpected = self.scorer_modules.load_state_dict(scorer_sd, strict=False)
         if missing:
-            print(f"[CoarseTopKScorer] Missing keys: {len(missing)}")
-            print(f"[CoarseTopKScorer] Sample: {missing[:5]}")
+            print(f"[LearnedScorer] Missing keys: {len(missing)}")
+            print(f"[LearnedScorer] Sample: {missing[:5]}")
         if unexpected:
-            print(f"[CoarseTopKScorer] Unexpected keys: {len(unexpected)}")
-            print(f"[CoarseTopKScorer] Sample: {unexpected[:5]}")
+            print(f"[LearnedScorer] Unexpected keys: {len(unexpected)}")
+            print(f"[LearnedScorer] Sample: {unexpected[:5]}")
 
         self.scorer_modules.to(self.device)
         self.scorer_modules.eval()
-        print("[CoarseTopKScorer] Scorer modules loaded successfully.")
+        print("[LearnedScorer] Scorer modules loaded successfully.")
 
     # ---- v2 normalization (x/50, y/20, heading/1.57) ----
 
