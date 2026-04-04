@@ -6,6 +6,7 @@ dependencies:
   - pip
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu118
+    - --find-links https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
     - torch==2.1.0+cu118
     - torchvision==0.16.0+cu118
     - torchaudio==2.1.0+cu118
