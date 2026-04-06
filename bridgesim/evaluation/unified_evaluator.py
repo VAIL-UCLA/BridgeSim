@@ -209,6 +209,27 @@ def create_model_adapter(args):
         from bridgesim.evaluation.models.lead_navsim_adapter import LEADNavsimAdapter
         return LEADNavsimAdapter(checkpoint_path=args.checkpoint)
 
+    elif model_type == "openpilot":
+        from bridgesim.evaluation.models.openpilot_adapter import OpenPilotAdapter
+        return OpenPilotAdapter(checkpoint_path=args.checkpoint)
+
+    elif model_type == "alpamayo_r1":
+        from bridgesim.evaluation.models.alpamayo_r1_adapter import AlpamayoR1Adapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else (1 if scorer is None else 1)
+        return AlpamayoR1Adapter(
+            checkpoint_path=args.checkpoint,
+            alp_python=args.alp_python,
+            alp_script=args.alp_script,
+            coord_mode=args.alp_coord_mode,
+            top_p=args.alp_top_p,
+            temperature=args.alp_temperature,
+            num_traj_samples=args.alp_num_traj_samples,
+            max_generation_length=args.alp_max_generation_length,
+            scorer=scorer,
+            num_groups=num_groups,
+        )
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -225,7 +246,7 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
         help="Model type to evaluate"
     )
     parser.add_argument(
@@ -296,6 +317,31 @@ def main():
         help="Path to DiffusionDrive v2 checkpoint for loading coarse scorer weights. "
              "Required when using --trajectory-scorer coarse_topk with DiffusionDrive v1."
     )
+
+    # AlpamayoR1 external-env parameters
+    parser.add_argument(
+        "--alp-python",
+        type=str,
+        default=os.environ.get("ALPAMAYO_PYTHON", ""),
+        help="Path to Alpamayo venv python. If empty, adapter will try sibling layout or env var ALPAMAYO_PYTHON."
+    )
+    parser.add_argument(
+        "--alp-script",
+        type=str,
+        default=os.environ.get("ALPAMAYO_SCRIPT", ""),
+        help="Path to BridgeSim Alpamayo glue script (tools/bridgesim_infer_once.py). Optional."
+    )
+    parser.add_argument(
+        "--alp-coord-mode",
+        type=str,
+        default="x_forward_y_left",
+        choices=["x_forward_y_left", "x_forward_y_right", "x_right_y_forward", "x_left_y_forward"],
+        help="Coordinate mapping for Alpamayo trajectory conversion."
+    )
+    parser.add_argument("--alp-top-p", type=float, default=0.98)
+    parser.add_argument("--alp-temperature", type=float, default=0.6)
+    parser.add_argument("--alp-num-traj-samples", type=int, default=20)
+    parser.add_argument("--alp-max-generation-length", type=int, default=256)
 
     # Temporal consistency parameters (for DiffusionDriveV2)
     parser.add_argument(

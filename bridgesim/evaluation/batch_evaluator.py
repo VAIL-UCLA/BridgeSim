@@ -55,7 +55,17 @@ class BatchEvaluator:
                  temporal_lambda: float = 0.3,
                  temporal_max_history: int = 8,
                  temporal_sigma: float = 5.0,
-                 consensus_temperature: float = 1.0):
+                 consensus_temperature: float = 1.0,
+                 alp_python: str = "",
+                 alp_script: str = "",
+                 alp_coord_mode: str = "x_forward_y_left",
+                 alp_top_p: float = 0.98,
+                 alp_temperature: float = 0.6,
+                 alp_num_traj_samples: int = 20,
+                 alp_max_generation_length: int = 256,
+                 trajectory_scorer: str = None,
+                 num_groups: int = None,
+                 v2_scorer_checkpoint: str = None):
         """
         Initialize batch evaluator.
 
@@ -82,6 +92,13 @@ class BatchEvaluator:
             score_start_frame: Frame to start calculating scores
             eval_mode: Evaluation mode ('closed_loop' or 'open_loop')
             enable_vis: Enable visualization outputs
+            alp_python: Path to Alpamayo venv python (alpamayo_r1 only)
+            alp_script: Path to BridgeSim Alpamayo glue script (alpamayo_r1 only)
+            alp_coord_mode: Coordinate mapping for Alpamayo trajectory conversion
+            alp_top_p: Top-p sampling parameter for Alpamayo
+            alp_temperature: Temperature for Alpamayo generation
+            alp_num_traj_samples: Number of trajectory samples for Alpamayo
+            alp_max_generation_length: Max generation length for Alpamayo
         """
         self.model_type = model_type
         self.config_path = config_path
@@ -112,10 +129,20 @@ class BatchEvaluator:
         self.temporal_max_history = temporal_max_history
         self.temporal_sigma = temporal_sigma
         self.consensus_temperature = consensus_temperature
+        self.alp_python = alp_python
+        self.alp_script = alp_script
+        self.alp_coord_mode = alp_coord_mode
+        self.alp_top_p = alp_top_p
+        self.alp_temperature = alp_temperature
+        self.alp_num_traj_samples = alp_num_traj_samples
+        self.alp_max_generation_length = alp_max_generation_length
+        self.trajectory_scorer = trajectory_scorer
+        self.num_groups = num_groups
+        self.v2_scorer_checkpoint = v2_scorer_checkpoint
 
         # Create output directories
         self.output_root.mkdir(parents=True, exist_ok=True)
-        self.log_dir = self.output_root / "logs"
+        self.log_dir = self.output_root / f"logs_{self._get_output_subdir()}"
         self.log_dir.mkdir(exist_ok=True)
 
         # Result tracking
@@ -149,7 +176,7 @@ class BatchEvaluator:
         }
 
         # Load previous results if resuming
-        self.results_file = self.output_root / "batch_results.json"
+        self.results_file = self.output_root / f"batch_results_{self._get_output_subdir()}.json"
         if self.resume and self.results_file.exists():
             with open(self.results_file, 'r') as f:
                 prev_results = json.load(f)
@@ -174,6 +201,21 @@ class BatchEvaluator:
                 print(f"Found {len(scenarios)} scenarios to evaluate (after filtering completed)")
 
         return scenarios
+
+    def _get_output_subdir(self) -> str:
+        """
+        Compute the output subdirectory name that unified_evaluator.py creates inside
+        --output-dir.  Must stay in sync with the logic in unified_evaluator.py.
+        """
+        eval_frames_str = str(self.eval_frames) if self.eval_frames is not None else "None"
+        subdir = f"{self.model_type}_rr{self.replan_rate}_erf{self.ego_replay_frames}_ef{eval_frames_str}"
+        if self.trajectory_scorer:
+            ng = self.num_groups if self.num_groups is not None else (
+                1 if self.model_type == "diffusiondrive" else 10)
+            subdir += f"_scorer_{self.trajectory_scorer}_ng{ng}"
+        if self.enable_temporal_consistency:
+            subdir += f"_ta{self.temporal_alpha}_th{self.temporal_max_history}"
+        return subdir
 
     def evaluate_scenario(self, scenario_path: Path) -> Dict[str, Any]:
         """
@@ -238,9 +280,6 @@ class BatchEvaluator:
         if self.eval_frames is not None:
             cmd.extend(["--eval-frames", str(self.eval_frames)])
 
-        # Add scorer type
-        cmd.extend(["--scorer-type", self.scorer_type])
-
         # Add score start frame if specified
         if self.score_start_frame is not None:
             cmd.extend(["--score-start-frame", str(self.score_start_frame)])
@@ -261,6 +300,26 @@ class BatchEvaluator:
             cmd.extend(["--temporal-sigma", str(self.temporal_sigma)])
             cmd.extend(["--consensus-temperature", str(self.consensus_temperature)])
 
+        # Add trajectory scorer flags
+        if self.trajectory_scorer:
+            cmd.extend(["--trajectory-scorer", self.trajectory_scorer])
+        if self.num_groups is not None:
+            cmd.extend(["--num-groups", str(self.num_groups)])
+        if self.v2_scorer_checkpoint:
+            cmd.extend(["--v2-scorer-checkpoint", self.v2_scorer_checkpoint])
+
+        # Add Alpamayo-specific flags
+        if self.model_type == "alpamayo_r1":
+            if self.alp_python:
+                cmd.extend(["--alp-python", self.alp_python])
+            if self.alp_script:
+                cmd.extend(["--alp-script", self.alp_script])
+            cmd.extend(["--alp-coord-mode", self.alp_coord_mode])
+            cmd.extend(["--alp-top-p", str(self.alp_top_p)])
+            cmd.extend(["--alp-temperature", str(self.alp_temperature)])
+            cmd.extend(["--alp-num-traj-samples", str(self.alp_num_traj_samples)])
+            cmd.extend(["--alp-max-generation-length", str(self.alp_max_generation_length)])
+
         # Run evaluation
         start_time = time.time()
         try:
@@ -276,8 +335,8 @@ class BatchEvaluator:
             duration = time.time() - start_time
 
             if result.returncode == 0:
-                # Check if output exists
-                output_dir = self.output_root / scenario_name
+                # Check if output exists (unified_evaluator nests under output_subdir/scenario_name/)
+                output_dir = self.output_root / self._get_output_subdir() / scenario_name
                 results_file = output_dir / "evaluation_results.json"
 
                 if results_file.exists():
@@ -407,8 +466,8 @@ class BatchEvaluator:
         result_files = []
         for scenario_name, result in self.results['scenarios'].items():
             if result['status'] == 'success':
-                # The evaluation_results.json is in output_root/scenario_name/
-                results_json = self.output_root / scenario_name / "evaluation_results.json"
+                # unified_evaluator nests under output_subdir/scenario_name/
+                results_json = self.output_root / self._get_output_subdir() / scenario_name / "evaluation_results.json"
                 if results_json.exists():
                     result_files.append(results_json)
 
@@ -443,7 +502,7 @@ class BatchEvaluator:
             # EPDMS scores (closed-loop: no ego_progress, uses route_completion instead)
             'epdms_score', 'no_at_fault_collisions', 'drivable_area_compliance',
             'driving_direction_compliance', 'traffic_light_compliance',
-            'time_to_collision', 'lane_keeping',
+            'time_to_collision_within_bound', 'lane_keeping',
             'history_comfort', 'extended_comfort'
         ]
 
@@ -452,7 +511,7 @@ class BatchEvaluator:
         epdms_totals = {
             'epdms_score': [], 'no_at_fault_collisions': [], 'drivable_area_compliance': [],
             'driving_direction_compliance': [], 'traffic_light_compliance': [],
-            'time_to_collision': [], 'lane_keeping': [],
+            'time_to_collision_within_bound': [], 'lane_keeping': [],
             'history_comfort': [], 'extended_comfort': []
         }
 
@@ -460,7 +519,7 @@ class BatchEvaluator:
             if result['status'] != 'success':
                 continue
 
-            scenario_dir = self.output_root / scenario_name
+            scenario_dir = self.output_root / self._get_output_subdir() / scenario_name
             row = {'scenario_name': scenario_name}
 
             # Load legacy scores from evaluation_results.json
@@ -479,10 +538,10 @@ class BatchEvaluator:
                         legacy_totals['route_completion'].append(row['route_completion'])
                         legacy_totals['infraction_penalty'].append(row['infraction_penalty'])
 
-            # Load EPDMS scores from *_closedloop_epdms_summary.csv (new format from base_evaluator)
-            epdms_files = list(scenario_dir.glob("*_closedloop_epdms_summary.csv"))
+            # Load EPDMS scores from *_closedloop_*_summary.csv (scorer-agnostic glob)
+            epdms_files = sorted(scenario_dir.glob("*_closedloop_*_summary.csv"))
             if epdms_files:
-                epdms_file = epdms_files[0]  # Take the most recent one
+                epdms_file = epdms_files[-1]  # Take the most recent (last alphabetically by timestamp)
                 with open(epdms_file, 'r') as f:
                     reader = csv.DictReader(f)
                     for epdms_row in reader:
@@ -491,10 +550,11 @@ class BatchEvaluator:
                         row['drivable_area_compliance'] = float(epdms_row.get('mean_drivable_area_compliance', 0.0))
                         row['driving_direction_compliance'] = float(epdms_row.get('mean_driving_direction_compliance', 0.0))
                         row['traffic_light_compliance'] = float(epdms_row.get('mean_traffic_light_compliance', 0.0))
-                        row['time_to_collision'] = float(epdms_row.get('mean_time_to_collision', 0.0))
+                        row['time_to_collision_within_bound'] = float(epdms_row.get('mean_time_to_collision_within_bound', 0.0))
                         row['lane_keeping'] = float(epdms_row.get('mean_lane_keeping', 0.0))
                         row['history_comfort'] = float(epdms_row.get('mean_history_comfort', 0.0))
-                        row['extended_comfort'] = float(epdms_row.get('mean_extended_comfort', 0.0))
+                        if 'mean_extended_comfort' in epdms_row:
+                            row['extended_comfort'] = float(epdms_row['mean_extended_comfort'])
 
                         for key in epdms_totals:
                             if key in row:
@@ -536,7 +596,7 @@ class BatchEvaluator:
         print(f"    Driving Direction Compliance: {avg_row.get('driving_direction_compliance', 0):.4f}")
         print(f"    Traffic Light Compliance:     {avg_row.get('traffic_light_compliance', 0):.4f}")
         print(f"\n  Weighted Metrics:")
-        print(f"    Time to Collision:            {avg_row.get('time_to_collision', 0):.4f}")
+        print(f"    Time to Collision:            {avg_row.get('time_to_collision_within_bound', 0):.4f}")
         print(f"    Lane Keeping:                 {avg_row.get('lane_keeping', 0):.4f}")
         print(f"    History Comfort:              {avg_row.get('history_comfort', 0):.4f}")
         print(f"    Extended Comfort:             {avg_row.get('extended_comfort', 0):.4f}")
@@ -769,7 +829,8 @@ def main():
 
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
-                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2"],
+                                 "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot",
+                                 "alpamayo_r1"],
                         help="Model type")
 
     parser.add_argument('--checkpoint', type=str, required=True,
@@ -844,12 +905,6 @@ def main():
                         help="Number of frames to evaluate after ego replay ends (default: None = run full scenario). "
                              "Total frames = min(ego_replay_frames + eval_frames, scenario_length)")
 
-    # Scorer type
-    parser.add_argument('--scorer-type', type=str, default='legacy',
-                        choices=['legacy', 'navsim'],
-                        help="Scorer type for closed_loop mode (default: legacy). "
-                             "'navsim' uses NavSim-style EPDMS scoring with per-frame metrics.")
-
     # Score start frame
     parser.add_argument('--score-start-frame', type=int, default=None,
                         help="Frame to start calculating scores (default: None = uses ego_replay_frames). "
@@ -883,6 +938,35 @@ def main():
     parser.add_argument('--consensus-temperature', type=float, default=1.0,
                         help="Softmax temperature for consensus trajectory weighting (default: 1.0)")
 
+    # AlpamayoR1 parameters
+    parser.add_argument('--alp-python', type=str, default="",
+                        help="Path to Alpamayo venv python (alpamayo_r1 only). "
+                             "Falls back to ALPAMAYO_PYTHON env var if empty.")
+    parser.add_argument('--alp-script', type=str, default="",
+                        help="Path to BridgeSim Alpamayo glue script (alpamayo_r1 only). "
+                             "Falls back to ALPAMAYO_SCRIPT env var if empty.")
+    parser.add_argument('--alp-coord-mode', type=str, default="x_forward_y_left",
+                        help="Coordinate mapping for Alpamayo trajectory conversion (default: x_forward_y_left)")
+    parser.add_argument('--alp-top-p', type=float, default=0.98,
+                        help="Top-p sampling for Alpamayo (default: 0.98)")
+    parser.add_argument('--alp-temperature', type=float, default=0.6,
+                        help="Generation temperature for Alpamayo (default: 0.6)")
+    parser.add_argument('--alp-num-traj-samples', type=int, default=20,
+                        help="Number of trajectory samples for Alpamayo (default: 20)")
+    parser.add_argument('--alp-max-generation-length', type=int, default=256,
+                        help="Max generation length for Alpamayo (default: 256)")
+
+    # Trajectory scorer (for DiffusionDrive/V2 inference scaling)
+    parser.add_argument('--trajectory-scorer', type=str, default=None,
+                        choices=["confidence", "coarse_topk", "epdms", "epdms_fast", "epdms_ego", "epdms_ego_v1"],
+                        help="Trajectory scorer for inference scaling (for DiffusionDrive/V2)")
+    parser.add_argument('--num-groups', type=int, default=None,
+                        help="Number of trajectory candidate groups. Total candidates = num_groups * 20. "
+                             "Only used with --trajectory-scorer. (default: 1 for v1, 10 for v2)")
+    parser.add_argument('--v2-scorer-checkpoint', type=str, default=None,
+                        help="Path to DiffusionDrive v2 checkpoint for coarse scorer weights. "
+                             "Required when using --trajectory-scorer coarse_topk with DiffusionDrive v1.")
+
     args = parser.parse_args()
 
     # Create batch evaluator
@@ -906,7 +990,6 @@ def main():
         sim_dt=args.sim_dt,
         ego_replay_frames=args.ego_replay_frames,
         eval_frames=args.eval_frames,
-        scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
         eval_mode=args.eval_mode,
         enable_vis=args.enable_vis,
@@ -915,7 +998,17 @@ def main():
         temporal_lambda=args.temporal_lambda,
         temporal_max_history=args.temporal_max_history,
         temporal_sigma=args.temporal_sigma,
-        consensus_temperature=args.consensus_temperature
+        consensus_temperature=args.consensus_temperature,
+        alp_python=args.alp_python,
+        alp_script=args.alp_script,
+        alp_coord_mode=args.alp_coord_mode,
+        alp_top_p=args.alp_top_p,
+        alp_temperature=args.alp_temperature,
+        alp_num_traj_samples=args.alp_num_traj_samples,
+        alp_max_generation_length=args.alp_max_generation_length,
+        trajectory_scorer=args.trajectory_scorer,
+        num_groups=args.num_groups,
+        v2_scorer_checkpoint=args.v2_scorer_checkpoint,
     )
 
     # Run evaluation

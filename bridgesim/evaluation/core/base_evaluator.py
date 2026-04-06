@@ -5,6 +5,7 @@ This is where cross-cutting features (like flow matching) should be added.
 
 import os
 import sys
+import traceback
 import numpy as np
 import cv2
 import pandas as pd
@@ -211,7 +212,7 @@ class BaseEvaluator:
                     # (same as MetaDrive's ReplayTrafficParticipantPolicy)
                     ego_vehicle.set_position(sim_pos)
                     ego_vehicle.set_heading_theta(sim_heading)
-                    ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=True)
+                    ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=False)
                     if 'angular_velocity' in log_state:
                         ego_vehicle.set_angular_velocity(log_state['angular_velocity'])
 
@@ -1066,6 +1067,7 @@ class BaseEvaluator:
 
         except Exception as e:
             print(f"Warning: Failed to render coarse candidates at frame {frame_id}: {e}")
+            traceback.print_exc()
 
     def render_replan_summary(self, env, final_ego_position):
         """
@@ -1940,6 +1942,7 @@ class BaseEvaluator:
                             # Score frame using current env state (no predicted trajectory needed)
                             metrics = self.epdms_scorer.score_frame_live(int(frame_id))
                             metrics['token'] = frame_id
+                            metrics['raw_route_completion'] = info.get('route_completion', 0.0)
                             self.epdms_results_closedloop.append(metrics)
 
                 # Update for next iteration
@@ -2040,8 +2043,36 @@ class BaseEvaluator:
                 # Finalize EPDMS scorer for closed-loop
                 if self.epdms_scorer is not None and self.epdms_results_closedloop:
                     df = pd.DataFrame(self.epdms_results_closedloop)
-                    df_valid = df[df['valid'] == True]
 
+                    # Canonical column order (matches rescore_multi_horizon.py expectations)
+                    _PERFRAME_COLS = [
+                        "token",
+                        "valid",
+                        "score",
+                        "no_at_fault_collisions",
+                        "drivable_area_compliance",
+                        "driving_direction_compliance",
+                        "traffic_light_compliance",
+                        "time_to_collision_within_bound",
+                        "lane_keeping",
+                        "history_comfort",
+                        "extended_comfort",
+                        "raw_route_completion",
+                    ]
+                    # Keep only columns that exist, in canonical order, then append any extras
+                    ordered_cols = [c for c in _PERFRAME_COLS if c in df.columns]
+                    extra_cols = [c for c in df.columns if c not in _PERFRAME_COLS]
+                    df = df[ordered_cols + extra_cols]
+
+                    # Always save the perframe CSV — rescore_multi_horizon needs all rows
+                    # (including invalid) for route completion computation
+                    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
+                    epdms_csv_path = self.output_dir / f"{timestamp}_closedloop_pdms_perframe.csv"
+                    df.to_csv(epdms_csv_path, index=False)
+                    metrics_label = "pdms"
+                    print(f"  Saved per-frame {metrics_label} to {epdms_csv_path}")
+
+                    df_valid = df[df['valid'] == True]
                     if not df_valid.empty:
                         # Compute mean of per-frame EPDMS scores (without EP)
                         mean_epdms = df_valid['score'].mean()
@@ -2049,8 +2080,7 @@ class BaseEvaluator:
                         # Final closed-loop score: mean(EPDMS_no_ep) × Route_Completion
                         final_score = mean_epdms * route_completion
 
-                        # Also compute mean of individual metrics for reporting
-                        mean_nc = df_valid['no_at_fault_collisions'].mean()
+                        mean_nc  = df_valid['no_at_fault_collisions'].mean()
                         mean_dac = df_valid['drivable_area_compliance'].mean()
                         mean_ddc = df_valid['driving_direction_compliance'].mean()
                         mean_tlc = df_valid['traffic_light_compliance'].mean()
@@ -2086,7 +2116,7 @@ class BaseEvaluator:
                             'mean_drivable_area_compliance': mean_dac,
                             'mean_driving_direction_compliance': mean_ddc,
                             'mean_traffic_light_compliance': mean_tlc,
-                            'mean_time_to_collision': mean_ttc,
+                            'mean_time_to_collision_within_bound': mean_ttc,
                             'mean_lane_keeping': mean_lk,
                             'mean_history_comfort': mean_hc,
                             'mean_extended_comfort': mean_ec,
