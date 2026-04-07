@@ -88,6 +88,18 @@ NAVSIMV2_MODELS = {
     }
 }
 
+
+# Models trained on nuPlan (nuplan directory)
+NUPLAN_MODELS = {
+    "diffusion_planner": {
+        "checkpoint": os.path.join(CKPT_BASE, "diffusion_planner/model.pth"),
+        "config": None,
+        "args_json": os.path.join(CKPT_BASE, "diffusion_planner/args.json"),
+        "normalization_json": str((_THIS_DIR.parent.parent / "modelzoo" / "diffusion_planner" / "normalization.json").resolve()),
+        "description": "Diffusion Planner (ICLR 2025) - vectorized diffusion-based planner trained on nuPlan",
+    },
+}
+
 # Other models
 COMMAAI_MODELS = {
     "openpilot": {
@@ -98,7 +110,7 @@ COMMAAI_MODELS = {
 }
 
 # Combined model configurations
-MODEL_CONFIGS = {**BENCH2DRIVE_MODELS, **NAVSIMV2_MODELS, **COMMAAI_MODELS}
+MODEL_CONFIGS = {**BENCH2DRIVE_MODELS, **NAVSIMV2_MODELS, **COMMAAI_MODELS, **NUPLAN_MODELS}
 
 
 def get_checkpoint_path(model_type: str) -> str:
@@ -167,6 +179,9 @@ def is_navsimv2_model(model_type: str) -> bool:
     """Check if a model is trained on NavSim v2."""
     return model_type.lower() in NAVSIMV2_MODELS
 
+def is_nuplan_model(model_type: str) -> bool:
+    """Check if a model is trained on nuPlan."""
+    return model_type.lower() in NUPLAN_MODELS
 
 def list_available_models() -> list:
     """List all available model types."""
@@ -203,6 +218,16 @@ def print_model_summary():
         if config['config']:
             print(f"    Config: {config['config']}")
         print(f"    Description: {config['description']}")
+
+    print("\n--- nuPlan Models ---")
+    for name, config in NUPLAN_MODELS.items():
+        print(f"  {name}:")
+        print(f"    Checkpoint: {config['checkpoint']}")
+        if config['config']:
+            print(f"    Config: {config['config']}")
+        print(f"    Description: {config['description']}")
+
+    print("=" * 80)
 
     print("=" * 80)
 

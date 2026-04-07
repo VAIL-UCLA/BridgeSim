@@ -578,6 +578,7 @@ def extract_map_features(map_api, center, radius, anchor):
                     SD.TYPE: MetaDriveType.LANE_SURFACE_STREET,
                     SD.POLYLINE: polyline,
                     "width": width_array,
+                    "roadblock_id": block.id,
                     SD.ENTRY: [edge.id for edge in lane_meta_data.incoming_edges],
                     SD.EXIT: [edge.id for edge in lane_meta_data.outgoing_edges],
                     SD.LEFT_NEIGHBORS: [edge.id for edge in block.interior_edges[:index]] \
@@ -892,13 +893,7 @@ def convert_scenario_from_frames(
 
         tracks["ego"]["state"]["position"][frame_idx] = ego_pos_local
         tracks["ego"]["state"]["heading"][frame_idx] = ego_yaw
-        # Convert ego velocity from local (body) frame to global frame
-        # ego_dynamic_state[:2] is [forward_vel, lateral_vel] in vehicle body frame
-        local_vel = frame["ego_dynamic_state"][:2]
-        cos_h, sin_h = np.cos(ego_yaw), np.sin(ego_yaw)
-        global_vx = cos_h * local_vel[0] - sin_h * local_vel[1]
-        global_vy = sin_h * local_vel[0] + cos_h * local_vel[1]
-        tracks["ego"]["state"]["velocity"][frame_idx] = np.array([global_vx, global_vy])
+        tracks["ego"]["state"]["velocity"][frame_idx] = frame["ego_dynamic_state"][:2]
         tracks["ego"]["state"]["valid"][frame_idx] = 1
         tracks["ego"]["state"]["length"][frame_idx] = 4.0
         tracks["ego"]["state"]["width"][frame_idx] = 1.8
@@ -979,6 +974,19 @@ def convert_scenario_from_frames(
     scenario[SD.METADATA]["number_summary"] = {"num_objects": len(tracks)}
     scenario[SD.METADATA]["object_summary"] = {}
     scenario[SD.METADATA]["log_name"] = first_frame.get("log_name", "unknown_log")
+    raw_roadblock_ids = [frame.get("roadblock_ids", []) for frame in frames]
+    if interpolate:
+        # interpolate_tracks produces (original_len - 1) * 5 + 1 steps
+        # Use nearest-neighbor: step i maps to original frame round(i / 5)
+        expansion_factor = 5
+        new_len = (len(raw_roadblock_ids) - 1) * expansion_factor + 1
+        interpolated_roadblock_ids = [
+            raw_roadblock_ids[min(round(i / expansion_factor), len(raw_roadblock_ids) - 1)]
+            for i in range(new_len)
+        ]
+        scenario[SD.METADATA]["roadblock_ids_per_frame"] = interpolated_roadblock_ids
+    else:
+        scenario[SD.METADATA]["roadblock_ids_per_frame"] = raw_roadblock_ids
 
     # Store frame info for replay script (frame tokens and camera tokens)
     frame_info = []

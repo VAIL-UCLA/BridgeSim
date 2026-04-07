@@ -230,6 +230,14 @@ def create_model_adapter(args):
             num_groups=num_groups,
         )
 
+    elif model_type == "diffusion_planner":
+        from bridgesim.evaluation.models.diffusion_planner_adapter import DiffusionPlannerAdapter
+        return DiffusionPlannerAdapter(
+            checkpoint_path=args.checkpoint,
+            args_json_path=getattr(args, 'args_json', None),
+            normalization_json_path=getattr(args, 'normalization_json', None),
+        )
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -246,7 +254,7 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1", "diffusion_planner"],
         help="Model type to evaluate"
     )
     parser.add_argument(
@@ -342,6 +350,20 @@ def main():
     parser.add_argument("--alp-temperature", type=float, default=0.6)
     parser.add_argument("--alp-num-traj-samples", type=int, default=20)
     parser.add_argument("--alp-max-generation-length", type=int, default=256)
+
+    # DiffusionDrive-specific parameters
+    parser.add_argument(
+        "--args-json",
+        type=str,
+        default=None,
+        help="Path to args.json config (for Diffusion Planner)"
+    )
+    parser.add_argument(
+        "--normalization-json",
+        type=str,
+        default=None,
+        help="Path to normalization.json (for Diffusion Planner)"
+    )
 
     # Temporal consistency parameters (for DiffusionDriveV2)
     parser.add_argument(
