@@ -10,7 +10,6 @@ python converters/openscene/convert_openscene_with_filter.py \
     --input-dir /path/to/navsim_logs \
     --output-dir /path/to/output \
     --map-root /path/to/maps \
-    --num-future-frames-extract 220 \
     --interpolate
 ```
 
@@ -22,12 +21,6 @@ python converters/openscene/convert_openscene_with_filter.py \
 | `--map-root` | Directory containing nuPlan HD maps |
 | `--num-future-frames-extract` | Number of future frames to extract |
 | `--interpolate` | Interpolate from 2Hz to 10Hz |
-
-Or use the provided script:
-
-```bash
-bash scripts/converter/convert_openscene.sh [input_dir] [output_dir] [map_root] [scene_filter]
-```
 
 ## Bench2Drive
 
@@ -48,12 +41,6 @@ python -m converters.nuscenes.convert_nuscenes \
     --num_workers 8
 ```
 
-Or use the provided script:
-
-```bash
-bash scripts/converter/convert_nuscenes.sh
-```
-
 ## Waymo
 
 ```bash
@@ -61,10 +48,4 @@ python -m converters.waymo.convert_waymo \
     --raw_data_path /path/to/waymo/tfrecords \
     --database_path /path/to/output \
     --num_workers 8
-```
-
-Or use the provided script:
-
-```bash
-bash scripts/converter/convert_waymo.sh
 ```

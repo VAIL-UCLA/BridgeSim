@@ -69,32 +69,13 @@ A:
 - `IDM` — simulate traffic using the Intelligent Driver Model
 
 **Q: What is `--replan-rate`?**  
-A: The number of simulation steps between model inference calls. A rate of 1 means the model is queried every step; higher values reduce compute but may degrade performance.
+A: The number of simulation steps between models' executions. A rate of 1 means the model is queried every step.
 
 **Q: What is `--ego-replay-frames`?**  
-A: The number of frames at the start of a scenario where the ego vehicle follows the logged trajectory before the model takes over. Useful for warm-starting the scene.
+A: The number of frames at the start of a scenario where the ego vehicle follows the logged trajectory before the model takes over. Useful for warm-starting the scene and avoid breaking simulation engine.
 
 **Q: Can I run open-loop evaluation?**  
 A: Yes, pass `--eval-mode open_loop` to `unified_evaluator.py`.
-
-**Q: How do I resume a batch evaluation that was interrupted?**  
-A:
-```bash
-bash scripts/evaluator/run_batch_eval.sh [model_type] [scenario_root] --resume
-```
-
-**Q: I get OOM errors. What should I do?**  
-A: Use `CUDA_VISIBLE_DEVICES` to select a specific GPU and avoid running multiple evaluations on the same GPU simultaneously:
-```bash
-CUDA_VISIBLE_DEVICES=1 bash scripts/evaluator/run_eval.sh transfuser /path/to/scenario
-```
-
-**Q: The scenario path is wrong. What's the correct format?**  
-A: Point to the individual scenario directory, not its parent:
-```
-✓ /path/to/scenarios/Accident_Town03_Route101_Weather23
-✗ /path/to/scenarios
-```
 
 ---
 
@@ -107,10 +88,8 @@ huggingface-cli login --token hf_xxxxxxxx
 ```
 
 **Q: What `--image-source` options does RAP support?**  
-A: `metadrive` (rendered by the simulator) and `rasterized_3d`.
+A: `metadrive` (rendered by the simulator) and `rasterized_3d` (for RAP).
 
-**Q: What `--planner-type` options does TCP support?**  
-A: `learned` and `reactive`.
 
 **Q: Can I add a new model?**  
 A: Yes. Create an adapter in `bridgesim/evaluation/models/` inheriting from `BaseModelAdapter`, implement `load_model()` and `run_inference()`, then register it in `unified_evaluator.py`. See `bridgesim/evaluation/README.md` for details.
