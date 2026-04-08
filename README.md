@@ -110,7 +110,7 @@ Each model group requires a different conda environment.
 #### NavSim models (DiffusionDrive, DiffusionDriveV2, LTF, TransFuser, DrivoR)
 
 ```bash
-conda env create -f mdsn.yaml
+conda env create -f mdsn.yml
 conda activate mdsn
 
 pip install -e nuplan-devkit/

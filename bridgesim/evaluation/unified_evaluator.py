@@ -6,6 +6,8 @@ Unified Evaluator - Single entry point for all models.
 import argparse
 import os
 import sys
+import warnings
+warnings.filterwarnings('ignore')
 from pathlib import Path
 
 # Initialize CUDA device BEFORE any imports that might use CUDA
@@ -15,9 +17,9 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ:
         # cudaSetDevice returns a tuple (error_code, )
         err, = cudart.cudaSetDevice(0)
         if err == cudart.cudaError_t.cudaSuccess:
-            print("[Early init] CUDA runtime device set to 0")
+            pass  # early init print suppressed
         else:
-            print(f"[Early init] Warning: Failed to set CUDA runtime device: {err}")
+            pass  # early init warning suppressed
     except Exception as e:
         # Pass silently if cuda-python is not installed or other errors occur
         # The main code will handle device placement via PyTorch
@@ -26,7 +28,7 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ:
 # Add evaluation to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bridgesim.evaluation.core.base_evaluator import BaseEvaluator
+from bridgesim.evaluation.core.base_evaluator import BaseEvaluator, _silence
 
 
 def create_trajectory_scorer(args):
@@ -39,7 +41,6 @@ def create_trajectory_scorer(args):
 
     if scorer_name == "cls":
         from bridgesim.evaluation.scorers import ClsScorer
-        print("Creating ClsScorer for trajectory selection")
         return ClsScorer()
 
     elif scorer_name == "learned":
@@ -50,7 +51,6 @@ def create_trajectory_scorer(args):
                 "--v2-scorer-checkpoint is required when using "
                 "--trajectory-scorer learned with DiffusionDrive v1."
             )
-        print(f"Creating LearnedScorer (v2_checkpoint={v2_ckpt})")
         return LearnedScorer(
             v2_scorer_checkpoint_path=v2_ckpt,
             device="cuda",
@@ -58,12 +58,10 @@ def create_trajectory_scorer(args):
 
     elif scorer_name == "gt":
         from bridgesim.evaluation.scorers.GT_scorer import GTScorer
-        print("Creating GTScorer (will be initialized after env setup)")
         return GTScorer()
 
     elif scorer_name == "tta":
         from bridgesim.evaluation.scorers.TTA_scorer import TTAScorer
-        print("Creating TTAScorer (will be initialized after env setup)")
         return TTAScorer()
 
     else:
@@ -79,7 +77,6 @@ def create_model_adapter(args):
         if model_type in ["uniad", "vad"]:
             # UniAD/VAD use the original BEV calibrator (256 channels, 200x200)
             from bridgesim.evaluation.features.bev_calibrator import create_bev_calibrator
-            print(f"Creating BEV calibrator with checkpoint: {args.bev_calibrator_checkpoint}")
             bev_calibrator = create_bev_calibrator(
                 checkpoint_path=args.bev_calibrator_checkpoint,
                 sample_steps=args.bev_sample_steps,
@@ -89,7 +86,6 @@ def create_model_adapter(args):
         elif model_type in ["diffusiondrive", "diffusiondrivev2", "transfuser"]:
             # DiffusionDrive v1/v2 use TransFuser BEV calibrator (512 channels, 8x8)
             from bridgesim.evaluation.features.transfuser_bev_calibrator import create_transfuser_bev_calibrator
-            print(f"Creating TransFuser BEV calibrator with checkpoint: {args.bev_calibrator_checkpoint}")
             bev_calibrator = create_transfuser_bev_calibrator(
                 checkpoint_path=args.bev_calibrator_checkpoint,
                 sample_steps=args.bev_sample_steps,
@@ -97,7 +93,7 @@ def create_model_adapter(args):
                 device="cuda"
             )
         else:
-            print(f"Warning: BEV calibrator not supported for model type: {model_type}")
+            pass  # BEV calibrator not supported warning suppressed
 
     if model_type == "uniad":
         from bridgesim.evaluation.models.uniad_vad_adapter import UniADVADAdapter
@@ -559,24 +555,18 @@ def main():
         import torch
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
-            print(f"PyTorch CUDA device initialized: {torch.cuda.get_device_name(0)}")
             try:
                 from cuda import cudart
-                # cudaSetDevice returns a tuple (error_code, )
                 err, = cudart.cudaSetDevice(0)
-                if err == cudart.cudaError_t.cudaSuccess:
-                    print("CUDA runtime device set to 0 successfully")
-                else:
-                    print(f"Warning: Failed to set CUDA runtime device: {err}")
-            except Exception as e:
-                print(f"Warning: Could not set CUDA runtime device: {e}")
+            except Exception:
+                pass
             os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
         else:
-            print("Warning: CUDA not available, running on CPU")
+            pass  # CUDA not available warning suppressed
 
     # Create model adapter
-    print(f"Creating {args.model_type.upper()} model adapter...")
-    model_adapter = create_model_adapter(args)
+    with _silence():
+        model_adapter = create_model_adapter(args)
 
     # Construct output directory with model parameters
     # Format: {output_dir}/{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames}[_ta{temporal_alpha}_th{temporal_max_history}]/
@@ -592,7 +582,6 @@ def main():
     full_output_dir = os.path.join(args.output_dir, output_subdir)
 
     # Create evaluator
-    print("Creating evaluator...")
     evaluator = BaseEvaluator(
         model_adapter=model_adapter,
         scenario_path=args.scenario_path,
@@ -611,11 +600,7 @@ def main():
     )
 
     # Run evaluation
-    print(f"\nStarting evaluation (Mode: {args.eval_mode})...")
-    print("="*60)
     evaluator.run()
-    print("="*60)
-    print("\nEvaluation complete!")
 
 
 if __name__ == "__main__":

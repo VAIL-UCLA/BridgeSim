@@ -6,6 +6,7 @@ This is where cross-cutting features (like flow matching) should be added.
 import os
 import sys
 import traceback
+import contextlib
 import numpy as np
 import cv2
 import pandas as pd
@@ -27,6 +28,37 @@ from bridgesim.evaluation.utils.epdms_scorer_md import EPDMSScorer
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
 from bridgesim.evaluation.utils.constants import VOID, LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
+
+
+@contextlib.contextmanager
+def _silence():
+    """Suppress all stdout/stderr output (Python-level and file-descriptor level)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_out_fd = os.dup(1)
+    saved_err_fd = os.dup(2)
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = open(os.devnull, 'w')
+        yield
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            sys.stdout.close()
+            sys.stderr.close()
+        except Exception:
+            pass
+        os.dup2(saved_out_fd, 1)
+        os.dup2(saved_err_fd, 2)
+        sys.stdout, sys.stderr = old_stdout, old_stderr
+        os.close(devnull_fd)
+        os.close(saved_out_fd)
+        os.close(saved_err_fd)
 
 
 class BaseEvaluator:
@@ -137,19 +169,7 @@ class BaseEvaluator:
         # topk_world: top-k candidate trajectories in world coordinates (for coverage visualization)
         self.planning_history = []
 
-        print(f"Initialized evaluator for {self.scenario_name}")
-        print(f"  Mode: {self.eval_mode}")
-        print(f"  Traffic mode: {self.traffic_mode}")
-        print(f"  Visualization: {self.enable_vis}")
-        print(f"  Save perframe: {self.save_perframe}")
-        print(f"  Replan rate: {self.replan_rate}")
-        if self.ego_replay_frames > 0:
-            print(f"  Ego log replay frames: {self.ego_replay_frames}")
-        if self.eval_frames is not None:
-            print(f"  Eval frames (after replay): {self.eval_frames}")
-        print(f"  Score start frame: {self.score_start_frame}")
-        if self.eval_mode == "closed_loop":
-            print(f"  Scorer type: {self.scorer_type}")
+        pass  # initialization prints suppressed
 
     def prepare_ego_replay_actions(self):
         """
@@ -169,7 +189,7 @@ class BaseEvaluator:
             else:
                 self.ego_log_actions.append(None)
 
-        print(f"Prepared {len(self.ego_log_actions)} ego log states for replay")
+        pass  # suppressed
 
     def _maybe_override_with_log_action(self, control, frame_id, env):
         """
@@ -219,12 +239,9 @@ class BaseEvaluator:
                     # Return neutral control to minimize physics interference
                     return np.array([0.0, 0.0])
             elif not self.warned_missing_ego_actions:
-                print(f"[WARNING] No logged ego action for frame {frame_id}")
                 self.warned_missing_ego_actions = True
 
-        # Log transition from replay to model control
-        if frame_id == self.ego_replay_frames:
-            print(f"[INFO] Ego log replay ended at frame {frame_id}. Switching to model control.")
+        # Transition from replay to model control (log suppressed)
 
         return control
 
@@ -283,8 +300,6 @@ class BaseEvaluator:
             raise FileNotFoundError(f"No .pkl file found in {scenario_subfolder}")
 
         scenario_pkl_path = scenario_pkl_files[0]
-        print(f"Loading scenario from: {scenario_pkl_path}")
-
         with open(scenario_pkl_path, 'rb') as f:
             try:
                 import pickle5
@@ -294,7 +309,6 @@ class BaseEvaluator:
                 self.scenario_data = pickle.load(f)
 
         self.sdc_id = self.scenario_data['metadata']['sdc_id']
-        print(f"SDC (ego) ID: {self.sdc_id}")
 
     def generate_route(self):
         """Generate waypoints and commands from ground-truth trajectory."""
@@ -321,7 +335,7 @@ class BaseEvaluator:
                 })
                 last_pos = pos[:2]
 
-        print(f"Subsampled to {len(waypoints)} waypoints (spacing={waypoint_spacing}m)")
+        pass  # suppressed
 
         # Generate commands based on heading changes
         for i in range(len(waypoints)):
@@ -351,7 +365,7 @@ class BaseEvaluator:
 
             self.route.append((wp['position'], command, wp['frame_idx']))
 
-        print(f"Generated {len(self.route)} route commands")
+        pass  # suppressed
 
     def get_next_waypoint(self, current_position):
         """Get next navigation waypoint and command."""
@@ -454,10 +468,6 @@ class BaseEvaluator:
             world_heading_0 = self.scenario_data['tracks'][self.sdc_id]['state']['heading'][0]
             self.position_offset = world_pos_0 - ego_position_sim
             self.heading_offset = world_heading_0 - ego_heading_sim
-
-            print(f"Initialized coordinate offsets:")
-            print(f"  Position offset: {self.position_offset}")
-            print(f"  Heading offset: {self.heading_offset:.4f} rad")
 
         # Transform to world space
         ego_position = ego_position_sim + self.position_offset
@@ -1215,7 +1225,7 @@ class BaseEvaluator:
                 for i in range(len(all_executed_points) - 1):
                     cv2.line(topdown_frame, all_executed_points[i], all_executed_points[i + 1], executed_color, 2, cv2.LINE_AA)
 
-            print(f"[Replan Summary] Drew {total_candidates_drawn} candidate trajectories")
+            pass  # replan summary print suppressed
 
             # Draw legend
             legend_overlay = topdown_frame.copy()
@@ -1246,7 +1256,7 @@ class BaseEvaluator:
             # Save summary image
             summary_path = self.output_dir / "replan_summary.png"
             cv2.imwrite(str(summary_path), topdown_frame)
-            print(f"Saved replan summary to: {summary_path}")
+            pass  # replan summary save print suppressed
 
         except Exception as e:
             print(f"Warning: Failed to render replan summary: {e}")
@@ -1460,16 +1470,13 @@ class BaseEvaluator:
 
     def generate_mp4(self, frame_ids, filename, source_filename, fps=10):
         """Helper to generate MP4 from per-frame image sequences."""
-        print(f"\nGenerating MP4 {filename} from {source_filename}...")
         try:
             paths = [self.output_dir / f"{fid:05d}" / source_filename for fid in frame_ids]
             paths = [p for p in paths if p.exists()]
             if not paths:
-                print(f"No images found for {filename}")
                 return
             first = cv2.imread(str(paths[0]))
             if first is None:
-                print(f"Could not read first frame for {filename}")
                 return
             h, w = first.shape[:2]
             mp4_path = self.output_dir / filename
@@ -1771,11 +1778,59 @@ class BaseEvaluator:
 
         return control, ego_state, plan_traj, world_traj
 
+    def _save_driving_score_summary(self, df, mean_epdms, route_completion, final_score):
+        """Save consolidated per-frame + average driving score summary CSV.
+
+        Columns: frame_id, valid, NC, DAC, DDC, TL, TTC, LK, HC, EC, DS, EPDMS_no_ep, RC
+        Per-frame rows leave DS/EPDMS_no_ep/RC blank.
+        AVERAGE row uses valid frames only for subscores.
+        """
+        _SUBSCORE_MAP = [
+            ('no_at_fault_collisions',        'NC'),
+            ('drivable_area_compliance',       'DAC'),
+            ('driving_direction_compliance',   'DDC'),
+            ('traffic_light_compliance',       'TL'),
+            ('time_to_collision_within_bound', 'TTC'),
+            ('lane_keeping',                   'LK'),
+            ('history_comfort',                'HC'),
+            ('extended_comfort',               'EC'),
+        ]
+
+        available = [(src, dst) for src, dst in _SUBSCORE_MAP if src in df.columns]
+        src_cols = [src for src, _ in available]
+        dst_cols = [dst for _, dst in available]
+
+        # Per-frame section — rename 'token' to 'frame_id'
+        perframe = df[['token', 'valid'] + src_cols].rename(
+            columns={**dict(available), 'token': 'frame_id'}
+        ).copy()
+        perframe['DS'] = ''
+        perframe['EPDMS_no_ep'] = ''
+        perframe['RC'] = ''
+
+        # AVERAGE row (subscores from valid frames only)
+        df_valid = df[df['valid'] == True]
+        avg = {'frame_id': 'AVERAGE', 'valid': ''}
+        for src, dst in available:
+            avg[dst] = round(df_valid[src].mean(), 6) if not df_valid.empty else ''
+        avg['DS'] = round(final_score, 6) if final_score is not None else ''
+        avg['EPDMS_no_ep'] = round(mean_epdms, 6) if mean_epdms is not None else ''
+        avg['RC'] = round(route_completion, 6) if route_completion is not None else ''
+
+        avg_df = pd.DataFrame([avg])[['frame_id', 'valid'] + dst_cols + ['DS', 'EPDMS_no_ep', 'RC']]
+        result_df = pd.concat([perframe, avg_df], ignore_index=True)
+
+        csv_path = self.output_dir / "driving_score_summary.csv"
+        result_df.to_csv(csv_path, index=False)
+        # print(f"  Saved driving score summary to {csv_path}")
+
     def run(self):
         """Run the complete evaluation."""
+        import warnings
+        warnings.filterwarnings('ignore')
         # Load model
-        print("Loading model...")
-        self.model_adapter.load_model()
+        with _silence():
+            self.model_adapter.load_model()
 
         # Reset temporal consistency history if adapter supports it
         if hasattr(self.model_adapter, 'reset_temporal_history'):
@@ -1793,15 +1848,13 @@ class BaseEvaluator:
             f"but need at least {self.replan_rate} waypoints. "
             f"Either reduce replan_rate to <= {interpolated_waypoints} or use a model with longer trajectory horizon."
         )
-        print(f"  Trajectory time horizon: {time_horizon}s ({interpolated_waypoints} waypoints at {self.sim_dt}s intervals)")
+        pass  # trajectory time horizon print suppressed
 
         # Load scenario
-        print("Loading scenario...")
         self.load_scenario()
         self.prepare_ego_replay_actions()
 
         # Generate route
-        print("Generating route...")
         self.generate_route()
         # Store a copy of the full route for visualization (route gets consumed during evaluation)
         self.full_route = list(self.route)
@@ -1809,13 +1862,9 @@ class BaseEvaluator:
         # Configure Environment Policy based on Mode
         agent_policy = EnvInputPolicy
         if self.eval_mode == "open_loop":
-            print("[INFO] Running in Open Loop Mode (Agent follows Ground Truth)")
             agent_policy = ReplayEgoCarPolicy
-        else:
-            print("[INFO] Running in Closed Loop Mode (Agent controlled by Model)")
 
         # Create environment
-        print("Creating environment...")
         self.env_manager = EnvironmentManager(
             self.scenario_path,
             traffic_mode=self.traffic_mode,
@@ -1827,36 +1876,37 @@ class BaseEvaluator:
         # Initialize controller based on type
         if self.controller_type == "pid":
             self.controller = PIDController()
-            print(f"  Controller: PIDController")
         else:
             self.controller = PurePursuitController()
-            print(f"  Controller: PurePursuitController")
         
         if self.eval_mode == "open_loop":
             # In open loop, env creation happens inside run but we need to create it early for EPDMS init if needed
             # But EnvironmentManager creates env on create_env()
             pass
         
-        env = self.env_manager.create_env()
-        obs, info = env.reset(seed=0)
-        print("Environment reset successful")
+        with _silence():
+            env = self.env_manager.create_env()
+            obs, info = env.reset(seed=0)
         
         # Initialize Scorers
         if self.eval_mode == "open_loop":
-            self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
+            with _silence():
+                self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
             self.epdms_results_openloop = []
         else:
             # Closed loop mode
             self.stats_manager = OfflineStatisticsManager(self.output_dir, self.scenario_name, self.scenario_data)
 
             # Initialize EPDMS scorer for closed-loop (uses score_frame_live)
-            self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
+            with _silence():
+                self.epdms_scorer = EPDMSScorer(self.scenario_data, env)
             self.epdms_scorer.reset_live_state()  # Reset motion history for new episode
             self.epdms_results_closedloop = []
 
         # Initialize EPDMS trajectory scorer if model adapter uses one
         if hasattr(self.model_adapter, 'scorer') and hasattr(self.model_adapter.scorer, 'initialize'):
-            self.model_adapter.scorer.initialize(self.scenario_data, env)
+            with _silence():
+                self.model_adapter.scorer.initialize(self.scenario_data, env)
 
         prev_velocity = np.array([0.0, 0.0, 0.0])
         prev_heading = 0.0
@@ -1866,7 +1916,6 @@ class BaseEvaluator:
         if self.eval_frames is not None:
             # Limit frames: score_start_frame + eval, capped by scenario length
             num_frames =  min(self.score_start_frame + self.eval_frames, scenario_length)
-            print(f"Frame limit: {self.score_start_frame} start + {self.eval_frames} eval = {num_frames} total (scenario has {scenario_length})")
         else:
             num_frames = scenario_length
         frame_ids = list(range(num_frames))
@@ -1893,13 +1942,11 @@ class BaseEvaluator:
             # Expected RC delta as fraction of total trajectory
             if total_distance > 0:
                 self.expected_rc_delta = expected_distance / total_distance
-                print(f"[INFO] Route completion normalization: expected RC delta = {self.expected_rc_delta:.4f} "
-                      f"(frames {start_frame}-{end_frame}, {expected_distance:.2f}m / {total_distance:.2f}m total)")
             else:
                 self.expected_rc_delta = None
 
         try:
-            for frame_id in tqdm(frame_ids, desc="Evaluating"):
+            for frame_id in tqdm(frame_ids, desc="Evaluating", disable=True):
                 # Process frame
                 control, ego_state, plan_traj, world_traj = self.process_frame(
                     env, frame_id, prev_velocity, prev_heading
@@ -1915,7 +1962,6 @@ class BaseEvaluator:
                     # Capture route completion baseline at score start frame
                     if self.route_completion_baseline is None:
                         self.route_completion_baseline = info.get('route_completion', 0.0)
-                        print(f"[INFO] Score calculation started at frame {frame_id} (route_completion baseline: {self.route_completion_baseline:.4f})")
 
                     # --- OPEN LOOP SPECIFIC SCORING ---
                     if self.eval_mode == "open_loop":
@@ -1967,7 +2013,7 @@ class BaseEvaluator:
                 self.planning_history[-1] = (prev_entry[0], prev_entry[1], prev_entry[2], prev_entry[3], consumed, prev_entry[5])
 
             # Save final statistics
-            print("Saving results...")
+            pass  # 'Saving results...' print suppressed
 
             # --- FINALIZATION: OPEN LOOP ---
             if self.eval_mode == "open_loop":
@@ -1985,29 +2031,18 @@ class BaseEvaluator:
                     df_valid = df_final[df_final['valid'] == True]
 
                     if not df_valid.empty:
-                        # Select only numeric columns for averaging
-                        numeric_cols = df_valid.select_dtypes(include=[np.number]).columns
-                        mean_values = df_valid[numeric_cols].mean()
-                        summary_row = pd.DataFrame([mean_values])
-                        summary_row['token'] = 'AVERAGE'
-                        summary_row['valid'] = True 
-                        summary_row = summary_row.reindex(columns=df_final.columns)
-                        df_with_summary = pd.concat([df_final, summary_row], ignore_index=True)
-                        
-                        print("\n=== FINAL OPEN LOOP RESULTS (AVERAGE OF VALID FRAMES) ===")
-                        # Use a safe formatter that checks type before applying float formatting
-                        print(summary_row.to_string(index=False, formatters={
-                            col: lambda x: "{:,.4f}".format(x) if isinstance(x, (int, float, np.number)) else str(x)
-                            for col in numeric_cols
-                        }))
-                    else:
-                        print("\n[WARNING] No valid frames found to calculate average.")
-                        df_with_summary = df_final
+                        mean_epdms = df_valid['score'].mean()
+                        final_score = mean_epdms
 
-                    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-                    csv_path = self.output_dir / f"{timestamp}_openloop_epdms_results.csv"
-                    df_with_summary.to_csv(csv_path, index=False)
-                    print(f"Saved EPDMS metrics to {csv_path}")
+                        print("\n=== FINAL OPEN LOOP RESULTS (AVERAGE OF VALID FRAMES) ===")
+                        numeric_cols = df_valid.select_dtypes(include=[np.number]).columns
+                        print(df_valid[numeric_cols].mean().to_string())
+                    else:
+                        mean_epdms = None
+                        final_score = None
+                        print("\n[WARNING] No valid frames found to calculate average.")
+
+                    self._save_driving_score_summary(df_final, mean_epdms, None, final_score)
 
             # --- FINALIZATION: CLOSED LOOP ---
             elif self.eval_mode == "closed_loop":
@@ -2019,10 +2054,8 @@ class BaseEvaluator:
                     # Normalize by expected RC delta if partial scenario evaluation
                     if self.expected_rc_delta is not None and self.expected_rc_delta > 0:
                         route_completion = min(1.0, actual_rc_delta / self.expected_rc_delta)
-                        print(f"[INFO] Route completion: {route_completion:.4f} (actual delta {actual_rc_delta:.4f} / expected {self.expected_rc_delta:.4f})")
                     else:
                         route_completion = actual_rc_delta
-                        print(f"[INFO] Route completion: {route_completion:.4f} (delta from baseline {self.route_completion_baseline:.4f})")
                 else:
                     route_completion = 0.0
 
@@ -2035,10 +2068,6 @@ class BaseEvaluator:
                     env.agent, last_info, self.has_terminated, False,
                     route_completion_override=route_completion
                 )
-
-                if self.stats_manager is not None:
-                    self.stats_manager.save_to_json()
-                    print(f"Saved evaluation metrics to: {self.stats_manager.get_save_path()}")
 
                 # Finalize EPDMS scorer for closed-loop
                 if self.epdms_scorer is not None and self.epdms_results_closedloop:
@@ -2064,73 +2093,31 @@ class BaseEvaluator:
                     extra_cols = [c for c in df.columns if c not in _PERFRAME_COLS]
                     df = df[ordered_cols + extra_cols]
 
-                    # Always save the perframe CSV — rescore_multi_horizon needs all rows
-                    # (including invalid) for route completion computation
-                    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-                    epdms_csv_path = self.output_dir / f"{timestamp}_closedloop_pdms_perframe.csv"
-                    df.to_csv(epdms_csv_path, index=False)
-                    metrics_label = "pdms"
-                    print(f"  Saved per-frame {metrics_label} to {epdms_csv_path}")
-
                     df_valid = df[df['valid'] == True]
                     if not df_valid.empty:
-                        # Compute mean of per-frame EPDMS scores (without EP)
                         mean_epdms = df_valid['score'].mean()
-
-                        # Final closed-loop score: mean(EPDMS_no_ep) × Route_Completion
                         final_score = mean_epdms * route_completion
-
-                        mean_nc  = df_valid['no_at_fault_collisions'].mean()
-                        mean_dac = df_valid['drivable_area_compliance'].mean()
-                        mean_ddc = df_valid['driving_direction_compliance'].mean()
-                        mean_tlc = df_valid['traffic_light_compliance'].mean()
-                        mean_ttc = df_valid['time_to_collision_within_bound'].mean()
-                        mean_lk = df_valid['lane_keeping'].mean()
-                        mean_hc = df_valid['history_comfort'].mean()
-                        mean_ec = df_valid['extended_comfort'].mean()
 
                         print("\n=== CLOSED-LOOP EPDMS RESULTS ===")
                         print(f"  Per-frame metrics (averaged over {len(df_valid)} valid frames):")
-                        print(f"    No At-Fault Collisions:      {mean_nc:.4f}")
-                        print(f"    Drivable Area Compliance:    {mean_dac:.4f}")
-                        print(f"    Driving Direction Compliance:{mean_ddc:.4f}")
-                        print(f"    Traffic Light Compliance:    {mean_tlc:.4f}")
-                        print(f"    Time-to-Collision:           {mean_ttc:.4f}")
-                        print(f"    Lane Keeping:                {mean_lk:.4f}")
-                        print(f"    History Comfort:             {mean_hc:.4f}")
-                        print(f"    Extended Comfort:            {mean_ec:.4f}")
+                        print(f"    No At-Fault Collisions:      {df_valid['no_at_fault_collisions'].mean():.4f}")
+                        print(f"    Drivable Area Compliance:    {df_valid['drivable_area_compliance'].mean():.4f}")
+                        print(f"    Driving Direction Compliance:{df_valid['driving_direction_compliance'].mean():.4f}")
+                        print(f"    Traffic Light Compliance:    {df_valid['traffic_light_compliance'].mean():.4f}")
+                        print(f"    Time-to-Collision:           {df_valid['time_to_collision_within_bound'].mean():.4f}")
+                        print(f"    Lane Keeping:                {df_valid['lane_keeping'].mean():.4f}")
+                        print(f"    History Comfort:             {df_valid['history_comfort'].mean():.4f}")
+                        print(f"    Extended Comfort:            {df_valid['extended_comfort'].mean():.4f}")
                         print(f"  Mean EPDMS (no EP):            {mean_epdms:.4f}")
                         print(f"  Route Completion:              {route_completion:.4f}")
                         print(f"  ----------------------------------------")
                         print(f"  FINAL SCORE: {mean_epdms:.4f} × {route_completion:.4f} = {final_score:.4f}")
-
-                        # Save per-frame results to CSV
-                        timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-                        epdms_csv_path = self.output_dir / f"{timestamp}_closedloop_epdms_perframe.csv"
-                        df.to_csv(epdms_csv_path, index=False)
-                        print(f"  Saved per-frame EPDMS to {epdms_csv_path}")
-
-                        # Save summary to CSV
-                        summary_dict = {
-                            'mean_no_at_fault_collisions': mean_nc,
-                            'mean_drivable_area_compliance': mean_dac,
-                            'mean_driving_direction_compliance': mean_ddc,
-                            'mean_traffic_light_compliance': mean_tlc,
-                            'mean_time_to_collision_within_bound': mean_ttc,
-                            'mean_lane_keeping': mean_lk,
-                            'mean_history_comfort': mean_hc,
-                            'mean_extended_comfort': mean_ec,
-                            'mean_epdms_no_ep': mean_epdms,
-                            'route_completion': route_completion,
-                            'final_score': final_score,
-                            'num_valid_frames': len(df_valid),
-                            'num_total_frames': len(df),
-                        }
-                        summary_csv_path = self.output_dir / f"{timestamp}_closedloop_epdms_summary.csv"
-                        pd.DataFrame([summary_dict]).to_csv(summary_csv_path, index=False)
-                        print(f"  Saved EPDMS summary to {summary_csv_path}")
                     else:
+                        mean_epdms = None
+                        final_score = None
                         print("\n[WARNING] No valid EPDMS frames found for closed-loop scoring.")
+
+                    self._save_driving_score_summary(df, mean_epdms, route_completion, final_score)
 
             # Generate GIFs and MP4s from visualizations
             if self.enable_vis:
@@ -2159,5 +2146,5 @@ class BaseEvaluator:
             if self.env_manager is not None:
                 self.env_manager.close()
 
-        print(f"Evaluation complete! Results saved to: {self.output_dir}")
+        print(f"Evaluation complete!")
         print("="*60)
