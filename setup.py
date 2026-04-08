@@ -1,7 +1,7 @@
 """
-BridgeSim - Cross-simulator Closed-loop Evaluation Platform for End-to-End Autonomous Driving
+BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving
 
-A unified evaluation system for autonomous driving models using MetaDrive simulator.
+A unified closed-loop evaluation platform for autonomous driving models using MetaDrive simulator.
 """
 
 from setuptools import setup, find_packages
@@ -9,7 +9,7 @@ from setuptools import setup, find_packages
 setup(
     name="bridgesim",
     version="0.1.0",
-    description="Cross-simulator Closed-loop Evaluation Platform for End-to-End Autonomous Driving",
+    description="BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving",
     author="BridgeSim Team",
     python_requires=">=3.8",
     packages=find_packages(include=["bridgesim", "bridgesim.*"]),
