@@ -1,0 +1,102 @@
+defaults:
+  - motion_default
+  - _self_
+
+exp_name: 'midgpt'
+
+eval_mode: 'Densetnt'
+
+baseline_dir: "/bigdata/yuxin/DenseTNT_scenarionet_waymo_training_500_all_agents"
+
+
+multi_mode: True
+
+SCGEN_GENERATION_TIME_TESTING_OUTPUT_DIR: '/bigdata/xuanhao/SCGEN'
+
+num_workers: 16
+val_num_workers: 16
+num_sanity_val_steps: 10
+
+batch_size: 10
+val_batch_size: 4
+limit_val_batches: 500
+
+eval_backward_model: False
+
+epochs: 30
+wandb: True
+log_dir: ./logs/
+
+REMOVE_AGENT_FROM_SCENE_ENCODER: True  # <<<
+
+BACKWARD_PREDICTION: False  # <<<
+ADD_CONTOUR_RELATION: True  # <<<
+
+DELTA_POS_IS_VELOCITY: True
+SIMPLE_RELATION: True
+
+RECONSTRUCT_MAP: False
+UPDATE_RELATION: False
+REMOVE_REL_NORM: False  # <<<
+
+USE_TRAFFICGEN: False
+USE_MOTION: True
+EVAL_MOTION: True
+EVAL_TRAFFICGEN: False
+
+GPT_STYLE: True  # <<<
+USE_ADALN: False
+
+SAMPLING:
+  TOPP: 0.95
+  TEMPERATURE: 1.0
+
+TOKENIZATION:
+  TOKENIZATION_METHOD: "BicycleModelTokenizerFixed0124"  # <<<
+  USE_CONTOUR_ERROR: True  # <<<
+  ALLOW_SKIP_STEP: True
+  ADD_NOISE: False
+  NUM_BINS: 33
+
+PREPROCESSING:
+    REMOVE_TRAFFIC_LIGHT_STATE: True  # <<<
+
+ACTION_LABEL:
+  USE_ACTION_LABEL: False  # Should never be set True.
+  USE_SAFETY_LABEL: False
+
+DATA:
+  TRAINING_DATA_DIR: ''
+  TEST_DATA_DIR: ''
+
+MCTS:
+  USE_MCTS: False
+  MCTS_DEPTH: 4
+  MCTS_WIDTH: 4
+
+MODEL:
+  NAME: 'gpt'
+  D_MODEL: 128
+  NUM_ATTN_HEAD: 8
+  # Encoder:
+  NUM_ATTN_LAYERS: 3
+  RELATIVE_PE: true
+  # Decoder:
+  NUM_DECODER_LAYERS: 6
+  RELATIVE_PE_DECODER: True
+  SIMPLE_RELATION_FACTOR: 1
+
+  # New:
+  KNN: 128
+  S2S_DISTANCE: null
+  A2S_KNN: 128
+  A2S_DISTANCE: null
+  A2A_KNN: 64
+  A2A_DISTANCE: 50
+  ADD_RELATION_TO_V: False
+  PER_CONTOUR_POINT_RELATION: False
+  IS_V7: True
+
+SUBMISSION:
+  METHOD_NAME: "pzh"
+  num_model_parameters: '7m'

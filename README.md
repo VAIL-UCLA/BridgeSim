@@ -29,7 +29,7 @@ BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end au
 
 ## Documentation
 
-- [Data Preparation](docs/data_preparation.md) — converting all supported datasets
+- [Data Preparation](docs/data_preparation.md) — converting all supported datasets, including adversarial scenario generation with ADV-BMT
 - [Evaluation Guide](docs/evaluation.md) — all models and evaluation options
 - [TTA Guide](docs/TTA_module.md) - Placeholder for implementation explanations on TTA module
 - [Q&A](docs/qa.md) — common questions and troubleshooting

@@ -1,0 +1,190 @@
+defaults:
+  - _self_
+
+eval_mode: ''
+
+# Experiment related
+exp_name: 'default'
+seed: 0
+epochs: 50
+batch_size: 10
+val_batch_size: 4
+num_workers: 16
+val_num_workers: 16
+num_sanity_val_steps: 100
+wandb: False
+log_dir: Null
+limit_train_batches: -1
+limit_val_batches: -1
+prefetch_factor: 2
+ckpt: Null
+eval: False
+pretrain: Null
+deterministic: False
+detect_anomaly: False
+check_val_every_n_epoch: 1
+
+eval_backward_model: False
+
+
+# Turn both on when training TG to match TrafficGen's metrics.
+LIMIT_MAP_RANGE: False
+FOLLOW_TRAFFICGEN: False
+FORCE_SDC_FOR_TRAFFICGEN: False
+ONLY_LANE_FOR_TRAFFICGEN: False
+
+# True then agent info will not be used in encoder,
+# and new tokens for history will be added for decoder.
+GPT_STYLE: false
+REMOVE_AGENT_FROM_SCENE_ENCODER: false
+USE_DIFFUSION: false
+USE_ADALN: false
+BACKWARD_PREDICTION: false
+
+ADD_CONTOUR_RELATION: false
+
+DELTA_TOKENIZER_FILE_NAME: "1030_argsort_less_256_128_128.pkl"
+
+
+USE_TRAFFICGEN: false
+USE_MOTION: true
+
+EVAL_MOTION: true
+EVAL_TRAFFICGEN: false
+
+DELTA_POS_IS_VELOCITY: false
+
+SIMPLE_RELATION: false
+SIMPLE_RELATION_FACTOR: 1
+
+RECONSTRUCT_MAP: false
+
+UPDATE_RELATION: false
+
+REMOVE_REL_NORM: false
+
+DATA:
+    TRAINING_DATA_DIR: '/data/datasets/scenarionet/waymo/training'
+    TEST_DATA_DIR: '/data/datasets/scenarionet/waymo/validation'
+    ADV_INFO_PATH: 'data/all_adv.pkl'
+    SAMPLE_INTERVAL_TRAINING: 1
+    SAMPLE_INTERVAL_TEST: 1
+    SD_PASSTHROUGH: false
+    ALLOW_CACHE: false
+    RETURN_HALFWAY: false  # Only used when generating LMDB dataset
+    USE_LMDB: false
+    USE_CACHE: false
+
+PREPROCESSING:
+    MAX_VECTORS: 128
+    MAX_MAP_FEATURES: 512
+    MAX_LENGTH_PER_MAP_FEATURE: 10000  # Useless
+    MAX_AGENTS: 128
+    MAX_TRAFFIC_LIGHTS: 64
+    PADDING_TO_MAX: false
+    keep_all_data: false # for debug
+    ADD_SDC_TO_OBJECT_OF_INTEREST: true  # Should be True when WOSAC
+    REMOVE_TRAFFIC_LIGHT_STATE: false
+
+TRAINING:
+    PREDICT_ALL_AGENTS: true
+
+EVALUATION:
+    NAME: 'waymo_motion_prediction'
+    PREDICT_ALL_AGENTS: false
+    DELETE_EVAL_RESULT: true
+    NUM_MODES: 6
+    MAXIMUM_BATCH_SIZE: 10000
+    USE_CACHE: true
+
+MODEL:
+    NAME: 'motionlm'
+    D_MODEL: 256
+    NUM_ATTN_LAYERS: 4
+    NUM_ATTN_HEAD: 8
+#    DROPOUT_OF_ATTN: 0.0
+    DROPOUT: 0.0
+    NUM_DECODER_LAYERS: 6
+    ADD_PE_FOR_TOKEN: true
+    RELATIVE_PE: true
+    RELATIVE_PE_DECODER: false
+    PRE_PROJECTION: false
+    KNN: 128
+    S2S_DISTANCE: null
+    SELF_ATTN_KNN: 128
+    CROSS_ATTN_KNN: 128
+    RANDOMIZE_AGENT_ID: true
+    A2S_KNN: null
+    A2S_DISTANCE: null
+    A2A_KNN: null
+    A2A_DISTANCE: null
+    ADD_RELATION_TO_V: false
+    IS_V7: False
+    PER_CONTOUR_POINT_RELATION: null
+
+TOKENIZATION:
+    TOKENIZATION_METHOD: delta_delta
+    NUM_SKIPPED_STEPS: 5
+    NUM_BINS: 13
+    X_MAX: 3.5  # <<< Deprecated
+    X_MIN: -3.5  # <<< Deprecated
+    Y_MAX: 3.5  # <<< Deprecated
+    Y_MIN: -3.5  # <<< Deprecated
+    ADD_NOISE: false
+    NOISE_TOPK: 5
+    ALLOW_SKIP_STEP: True
+
+    MIN_DISPLACEMENT: 0.1
+    MIN_DISPLACEMENT_INIT: null
+    MIN_SPEED: null
+    SMOOTH_FACTOR: null
+    MAX_HEADING_DIFF: null
+
+    USE_CONTOUR_ERROR: True
+
+    VEH_LIMIT: 3.5
+    PED_LIMIT: 3.5
+    CYC_LIMIT: 3.5
+
+    FLIP_WRONG_HEADING: false
+    SHOULD_STANDARDIZE: true
+
+#    MIN_DISPLACEMENT: 0.3
+#    MIN_DISPLACEMENT_INIT: 1.0
+#    MIN_SPEED: 0.5
+#    SMOOTH_FACTOR: null
+#    MAX_HEADING_DIFF: 0.3
+
+
+SAMPLING:
+    SAMPLING_METHOD: 'topp'
+    TEMPERATURE: 1.0
+    TOPP: 0.95
+
+
+OPTIMIZATION:
+#    NUM_EPOCHS: 50
+    OPTIMIZER: AdamW
+    LR: 0.0003
+    WEIGHT_DECAY: 0.0
+    GRAD_NORM_CLIP: 1.0
+    SCHEDULER: cosine
+    WARMUP_STEPS: 2000
+#    TRAINING_STEPS: 300000
+    USE_FOCAL_LOSS: false
+
+TMP_DIR: "tmp"  # Relative to repo root
+
+ACTION_LABEL:
+    USE_ACTION_LABEL: false  # Only valid for turning + acceleration
+    USE_SAFETY_LABEL: false
+    MASK_PROBABILITY_ACTION_LABEL: 0.0  # Might turn it on
+    MASK_PROBABILITY_SAFETY_LABEL: 0.0  # Might turn it on
+
+LANGUAGE_CONDITION: false
+FINE_TUNE_BERT: false
+
+MCTS:
+  USE_MCTS: False
+  MCTS_DEPTH: -1
+  MCTS_WIDTH: -1

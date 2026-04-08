@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adv-bmt"
+dynamic = ["version"]
+description = "Bidirectional Motion Transformer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+
+dependencies = [
+  "numpy>=1.26,<2",
+  "pyyaml>=6,<7",
+  "tqdm>=4.66,<5",
+  "easydict>=1,<2",
+  "scikit-image>=0.22,<1",
+  "wandb>=0.16,<1",
+  "tabulate>=0.9,<1"
+]
+
+
+[project.optional-dependencies]
+train = [
+  "lightning>=2.3,<2.6",
+  "tensorboardX>=2.6,<3"
+]
+serve = [
+  "gradio>=4,<6"
+]
+dev = [
+  "pytest>=7,<9", "black>=24,<25", "ruff>=0.5", "pre-commit>=3"
+]
+
+
+[tool.setuptools]
+package-dir = {"" = "."}
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bmt*"]
+
+[project.scripts]
+bmt-demo = "bmt.cli:main"
