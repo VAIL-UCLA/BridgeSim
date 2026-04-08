@@ -10,7 +10,7 @@
 
 \* Equal contribution &nbsp;&nbsp; † Corresponding author
 
-BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end autonomous driving policies, built on [MetaDrive](https://github.com/metadriverse/metadrive). It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more).
+BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end autonomous driving policies, built on the [MetaDrive](https://github.com/metadriverse/metadrive) simulator. It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more). BridgeSim provides a unified evaluation interface that bridges the gap between training-time datasets and deployment-time environments, enabling fair and reproducible benchmarking across diverse driving scenarios.
 
 ## News
 
@@ -24,6 +24,8 @@ BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end au
 - [√] Scenario conversion from OpenScene / NavSim, Bench2Drive, nuScenes, and Waymo to ScenarioNet format
 - [√] Open-loop and closed-loop evaluation modes
 - [√] Configurable traffic modes: `no_traffic`, `log_replay`, `IDM`
+- [] Adversarial traffic mode
+- [] Implementation of Observational Calibrator
 
 ## Documentation
 
@@ -40,8 +42,6 @@ This section walks through converting the **NavHard** split and evaluating **Tra
 ### Step 1: Install
 
 ```bash
-docker pull robinwangucsd/metabench:latest
-
 git clone https://github.com/VAIL-UCLA/BridgeSim.git
 cd BridgeSim
 git clone https://github.com/motional/nuplan-devkit.git
@@ -70,25 +70,27 @@ huggingface-cli download sethzhao506ucla/BridgeSim --local-dir ckpts/BridgeSim
 ### Step 3: Convert NavHard Scenarios
 
 ```bash
-bash scripts/converter/convert_openscene.sh \
-    /path/to/navsim_logs \
-    /path/to/output/navhard \
-    /path/to/maps \
-    converters/openscene/filter/navhard_two_stage.yaml
+python converters/openscene/convert_openscene_with_filter.py \
+    --scene-filter converters/openscene/filter/navhard_two_stage.yaml \
+    --input-dir /path/to/navsim_logs \
+    --output-dir /path/to/output \
+    --map-root /path/to/maps \
+    --num-future-frames-extract 40 \ #future 20 seconds since navsim sampling is 2hz
+    --interpolate
 ```
 
 ### Step 4: Evaluate with TransFuser
 
+Run evaluations on a single scenario:
 ```bash
-conda activate mdsn
+update here
 
-bash scripts/evaluator/run_eval.sh transfuser /path/to/output/navhard/YourScenario 0
 ```
 
 Or run batch evaluation over all converted scenarios:
 
 ```bash
-bash scripts/evaluator/run_batch_eval.sh transfuser /path/to/output/navhard
+update here
 ```
 
 Results are saved to `outputs/` by default.
