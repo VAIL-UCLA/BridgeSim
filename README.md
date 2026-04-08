@@ -79,7 +79,7 @@ python converters/openscene/convert_openscene_with_filter.py \
     --interpolate
 ```
 
-You should be getting 421 converted scenarios after running this. Refer to converters/openscene/converted_list/navhard421.txt for specific list.
+You should be getting 421 converted scenarios after running this. Refer to `converters/openscene/converted_list/navhard421.txt` for specific list.
 
 ### Step 4: Evaluate with TransFuser
 
