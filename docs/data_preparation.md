@@ -10,6 +10,7 @@ python converters/openscene/convert_openscene_with_filter.py \
     --input-dir /path/to/navsim_logs \
     --output-dir /path/to/output \
     --map-root /path/to/maps \
+    --num-future-frames-extract <N> \
     --interpolate
 ```
 
