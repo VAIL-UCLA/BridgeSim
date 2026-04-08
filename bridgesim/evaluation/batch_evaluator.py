@@ -45,7 +45,7 @@ class BatchEvaluator:
                  sim_dt: float = 0.1,
                  ego_replay_frames: int = 0,
                  eval_frames: int = None,
-                 scorer_type: str = "legacy",
+                 # scorer_type: str = "legacy",
                  score_start_frame: int = None,
                  eval_mode: str = "closed_loop",
                  enable_vis: bool = False,
@@ -88,7 +88,6 @@ class BatchEvaluator:
             sim_dt: Simulation timestep in seconds (default: 0.1s for 10Hz)
             ego_replay_frames: Number of initial frames to replay ego log actions
             eval_frames: Number of frames to evaluate after ego replay ends
-            scorer_type: Scorer type ('legacy' or 'navsim')
             score_start_frame: Frame to start calculating scores
             eval_mode: Evaluation mode ('closed_loop' or 'open_loop')
             enable_vis: Enable visualization outputs
@@ -119,7 +118,7 @@ class BatchEvaluator:
         self.sim_dt = sim_dt
         self.ego_replay_frames = ego_replay_frames
         self.eval_frames = eval_frames
-        self.scorer_type = scorer_type
+        # self.scorer_type = scorer_type
         self.score_start_frame = score_start_frame
         self.eval_mode = eval_mode
         self.enable_vis = enable_vis

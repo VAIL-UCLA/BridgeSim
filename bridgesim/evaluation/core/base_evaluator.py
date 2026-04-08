@@ -23,7 +23,7 @@ from metadrive.policy.env_input_policy import EnvInputPolicy
 from metadrive.policy.replay_policy import ReplayEgoCarPolicy
 from metadrive.scenario.parse_object_state import parse_object_state
 
-from bridgesim.evaluation.utils import PIDController, PurePursuitController, OfflineStatisticsManager
+from bridgesim.evaluation.utils import PIDController, PurePursuitController  # , OfflineStatisticsManager
 from bridgesim.evaluation.utils.epdms_scorer_md import EPDMSScorer
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
@@ -89,7 +89,7 @@ class BaseEvaluator:
                  sim_dt: float = 0.1,
                  ego_replay_frames: int = 0,
                  eval_frames: int = None,
-                 scorer_type: str = "legacy",
+                 # scorer_type: str = "legacy",
                  score_start_frame: int = None,
                  ):
         """
@@ -108,7 +108,6 @@ class BaseEvaluator:
             sim_dt: Simulation timestep in seconds (default: 0.1s for 10Hz)
             ego_replay_frames: Number of initial frames to replay ego log actions (inference still runs)
             eval_frames: Number of frames to evaluate after ego replay (None = full scenario)
-            scorer_type: Scorer type for closed_loop ('legacy' or 'navsim')
             score_start_frame: Frame to start calculating scores (None = use ego_replay_frames)
         """
         self.model_adapter = model_adapter
@@ -126,7 +125,7 @@ class BaseEvaluator:
         self.replan_rate = replan_rate
         self.ego_replay_frames = max(0, ego_replay_frames)
         self.eval_frames = eval_frames
-        self.scorer_type = scorer_type
+        # self.scorer_type = scorer_type
         # Score start frame: defaults to ego_replay_frames if not specified
         self.score_start_frame = score_start_frame if score_start_frame is not None else self.ego_replay_frames
 
@@ -140,7 +139,7 @@ class BaseEvaluator:
 
         # Control and statistics
         self.controller = None
-        self.stats_manager = None
+        # self.stats_manager = None
         self.epdms_scorer = None
         self.epdms_results_openloop = []
         self.epdms_results_closedloop = []
@@ -1895,7 +1894,7 @@ class BaseEvaluator:
             self.epdms_results_openloop = []
         else:
             # Closed loop mode
-            self.stats_manager = OfflineStatisticsManager(self.output_dir, self.scenario_name, self.scenario_data)
+            # self.stats_manager = OfflineStatisticsManager(self.output_dir, self.scenario_name, self.scenario_data)
 
             # Initialize EPDMS scorer for closed-loop (uses score_frame_live)
             with _silence():
@@ -1981,7 +1980,7 @@ class BaseEvaluator:
 
                     # --- CLOSED LOOP SPECIFIC SCORING ---
                     if self.eval_mode == "closed_loop":
-                        self.stats_manager.update_per_step(env.agent, info, frame_id)
+                        # self.stats_manager.update_per_step(env.agent, info, frame_id)
 
                         # EPDMS per-frame scoring using LIVE simulation state
                         if self.epdms_scorer is not None:
@@ -2060,14 +2059,14 @@ class BaseEvaluator:
                     route_completion = 0.0
 
                 # Finalize stats manager (legacy scoring)
-                from metadrive.constants import TerminationState
-                if not self.has_terminated:
-                    # Normal completion (reached end of eval frames)
-                    last_info[TerminationState.SUCCESS] = True
-                self.stats_manager.finalize_route(
-                    env.agent, last_info, self.has_terminated, False,
-                    route_completion_override=route_completion
-                )
+                # from metadrive.constants import TerminationState
+                # if not self.has_terminated:
+                #     # Normal completion (reached end of eval frames)
+                #     last_info[TerminationState.SUCCESS] = True
+                # self.stats_manager.finalize_route(
+                #     env.agent, last_info, self.has_terminated, False,
+                #     route_completion_override=route_completion
+                # )
 
                 # Finalize EPDMS scorer for closed-loop
                 if self.epdms_scorer is not None and self.epdms_results_closedloop:
