@@ -91,7 +91,7 @@ checkpoints/
 checkpoint/
 ckpt/
 ckpts/
-nuscenes/
+# nuscenes/
 waymo_test_data/
 tensorboard_logs/
 .neptune/

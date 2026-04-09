@@ -34,6 +34,12 @@ python converters/bench2drive/convert_bench2drive.py \
 
 ## nuScenes
 
+Install the nuScenes devkit first:
+
+```bash
+pip install nuscenes-devkit
+```
+
 ```bash
 python -m converters.nuscenes.convert_nuscenes \
     --dataroot /path/to/nuScenes \
