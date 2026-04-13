@@ -205,7 +205,13 @@ class DiffusionPlannerAdapter(BaseModelAdapter):
         print(f"[DiffusionPlanner] Loaded model from {self.checkpoint_path}")
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
-        return {}  # no cameras needed
+        # No cameras needed for inference, but provide CAM_F0 for visualization
+        return {
+            "CAM_F0": {
+                "fov": 70.0, "x": 1.5, "y": 0.0, "z": 1.5,
+                "yaw": 0.0, "pitch": -5.0, "roll": 0.0,
+            }
+        }
 
     def get_waypoint_dt(self) -> float:
         return 0.5  # subsample from 10Hz to 2Hz for controller (same convention as other models)
@@ -574,7 +580,7 @@ class DiffusionPlannerAdapter(BaseModelAdapter):
             # Try to get polygon or width info for boundary estimation
             width_arr = feat.get('width', None)
             if width_arr is not None:
-                width_arr = np.array(width_arr, dtype=np.float64)
+                width_arr = np.array(width_arr, dtype=np.float64).flatten()
                 # Interpolate width to lane_len
                 if len(width_arr) != lane_len:
                     width_interp = np.interp(

@@ -231,7 +231,7 @@ class BaseEvaluator:
                     # (same as MetaDrive's ReplayTrafficParticipantPolicy)
                     ego_vehicle.set_position(sim_pos)
                     ego_vehicle.set_heading_theta(sim_heading)
-                    ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=False)
+                    ego_vehicle.set_velocity(log_state['velocity'], in_local_frame=True)
                     if 'angular_velocity' in log_state:
                         ego_vehicle.set_angular_velocity(log_state['angular_velocity'])
 
