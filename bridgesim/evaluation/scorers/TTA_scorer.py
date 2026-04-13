@@ -160,10 +160,8 @@ class TTAScorer(BaseTrajectoryScorer):
             start_pos_world = sdc_track['state']['position'][0][:2]
             start_pos_sim = self.env.agent.position
             self.world_to_sim_offset = np.array(start_pos_sim) - np.array(start_pos_world)
-            print(f"[EPDMS AdaptiveCol] Calibrated World->Sim Offset: {self.world_to_sim_offset}")
         else:
             self.world_to_sim_offset = np.array([0.0, 0.0])
-            print("[EPDMS AdaptiveCol] Could not calibrate coordinates (Frame 0 invalid).")
 
         self.prev_frame_idx = None
         self._prev_best_interp = None
@@ -171,8 +169,6 @@ class TTAScorer(BaseTrajectoryScorer):
         self._prev_best_ego_pos = None
         self._prev_best_ego_heading = None
         self._initialized = True
-        print(f"[EPDMS AdaptiveCol] Initialized with {len(self.all_lanes)} lanes, "
-              f"gamma={self.gamma} (COL + plan continuity)")
 
     # ---------------------------------------------------------------
     # Helpers
@@ -850,12 +846,6 @@ class TTAScorer(BaseTrajectoryScorer):
 
             elapsed = time.time() - t_start
             n_wp = len(shifted_planner_current)
-            print(f"[EPDMS AdaptiveCol] Frame {frame_idx}: KEPT prev_best, "
-                  f"prev_remaining={prev_remaining_score:.4f}, "
-                  f"best_new_trimmed={best_new_trimmed_score:.4f}, "
-                  f"best_new_full={best_new_score:.4f}, "
-                  f"remaining_wp={n_wp}, consumed_sim={self._prev_best_consumed}, "
-                  f"replan_frames={replan_sim_frames}, time={elapsed:.2f}s")
 
             self.prev_frame_idx = frame_idx
             return {
@@ -873,9 +863,6 @@ class TTAScorer(BaseTrajectoryScorer):
             self._prev_best_ego_heading = float(ego_state['heading'])
 
             elapsed = time.time() - t_start
-            print(f"[EPDMS AdaptiveCol] Frame {frame_idx}: SWITCH to new idx={best_new_idx}/{N}, "
-                  f"score={scores[best_new_idx]:.4f}, "
-                  f"K={n_execute}, replan_frames={replan_sim_frames}, time={elapsed:.2f}s")
 
             self.prev_frame_idx = frame_idx
             return {
