@@ -98,6 +98,12 @@ NUPLAN_MODELS = {
         "normalization_json": str((_THIS_DIR.parent.parent / "modelzoo" / "diffusion_planner" / "normalization.json").resolve()),
         "description": "Diffusion Planner (ICLR 2025) - vectorized diffusion-based planner trained on nuPlan",
     },
+    "plan_r1": {
+        "checkpoint": os.path.join(CKPT_BASE, "plan_r1/model.ckpt"),
+        "config": None,
+        "token_dict_path": str((_THIS_DIR.parent.parent / "modelzoo" / "plan_r1" / "tokens" / "tokens_1024.pt").resolve()),
+        "description": "Plan-R1 - token-based autoregressive planner with GRPO fine-tuning trained on nuPlan",
+    },
 }
 
 # Other models

@@ -234,6 +234,14 @@ def create_model_adapter(args):
             normalization_json_path=getattr(args, 'normalization_json', None),
         )
 
+    elif model_type == "plan_r1":
+        from bridgesim.evaluation.models.plan_r1_adapter import PlanR1Adapter
+        return PlanR1Adapter(
+            checkpoint_path=args.checkpoint,
+            token_dict_path=getattr(args, 'token_dict_path', None),
+            mode=getattr(args, 'plan_r1_mode', 'plan'),
+        )
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -250,7 +258,7 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1", "diffusion_planner"],
+        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1", "diffusion_planner", "plan_r1"],
         help="Model type to evaluate"
     )
     parser.add_argument(
@@ -347,18 +355,21 @@ def main():
     parser.add_argument("--alp-num-traj-samples", type=int, default=20)
     parser.add_argument("--alp-max-generation-length", type=int, default=256)
 
-    # DiffusionDrive-specific parameters
+    # Plan-R1-specific parameters
     parser.add_argument(
-        "--args-json",
+        "--plan-r1-mode",
         type=str,
-        default=None,
-        help="Path to args.json config (for Diffusion Planner)"
+        default="plan",
+        choices=["plan", "pred"],
+        help="Plan-R1 inference mode: 'plan' uses the RL-fine-tuned planning backbone (default), "
+             "'pred' uses the imitation-learning prediction backbone only."
     )
     parser.add_argument(
-        "--normalization-json",
+        "--token-dict-path",
         type=str,
         default=None,
-        help="Path to normalization.json (for Diffusion Planner)"
+        help="Path to Plan-R1 token dictionary (.pt file). "
+             "Defaults to bridgesim/modelzoo/plan_r1/tokens/tokens_1024.pt."
     )
 
     # Temporal consistency parameters (for DiffusionDriveV2)
@@ -564,6 +575,22 @@ def main():
         default=None,
         help="Frame to start calculating scores (default: None = uses ego_replay_frames). "
              "Scoring metrics and route completion are computed only from this frame onwards."
+    )
+
+    # Diffusion Planner specific args
+    parser.add_argument(
+        "--args-json",
+        type=str,
+        default=None,
+        dest="args_json",
+        help="Path to args.json for Diffusion Planner (overrides default hyperparameters)."
+    )
+    parser.add_argument(
+        "--normalization-json",
+        type=str,
+        default=None,
+        dest="normalization_json",
+        help="Path to normalization.json for Diffusion Planner (default: vendored copy in modelzoo)."
     )
 
     args = parser.parse_args()
