@@ -169,6 +169,14 @@ The codebase is built upon [MetaDrive](https://github.com/metadriverse/metadrive
 ## Citation
 
 If you find this repository useful for your research, please consider giving us a star 🌟 and citing our paper.
+ ```bibtex
+@article{zhao2026bridgesim,
+  title={BridgeSim: Unveiling the OL-CL Gap in End-to-End Autonomous Driving},
+  author={Zhao, Seth Z and Wang, Luobin and Ruan, Hongwei and Bao, Yuxin and Chen, Yilan and Leng, Ziyang and Ravichandran, Abhijit and He, Honglin and Zhou, Zewei and Han, Xu and others},
+  journal={arXiv preprint arXiv:2604.10856},
+  year={2026}
+}
+```
 
 ## License
 
