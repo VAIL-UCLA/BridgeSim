@@ -1699,7 +1699,7 @@ class BaseEvaluator:
                 ego_state['waypoint'], ego_state['command'],
                 planned_traj_world=world_traj, planned_traj_ego=plan_traj
             )
-            self.render_cam_f0_vis(env, frame_id, ego_state, plan_traj)
+            # self.render_cam_f0_vis(env, frame_id, ego_state, plan_traj)
 
             # Render DiffusionDriveV2-specific candidate visualizations
             # Use cached prediction pose (not current ego pose) so candidates stay anchored to prediction point
@@ -1945,7 +1945,7 @@ class BaseEvaluator:
                 self.expected_rc_delta = None
 
         try:
-            for frame_id in tqdm(frame_ids, desc="Evaluating", disable=True):
+            for frame_id in tqdm(frame_ids, desc="Evaluating", disable=False):
                 # Process frame
                 control, ego_state, plan_traj, world_traj = self.process_frame(
                     env, frame_id, prev_velocity, prev_heading
