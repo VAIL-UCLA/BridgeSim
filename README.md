@@ -163,6 +163,8 @@ All arguments from `unified_evaluator.py` are supported. Additional batch-specif
 
 Results are saved to `outputs/` by default.
 
+For sequential batch evaluation with aggregated per-scenario metrics, refer to [scripts/sequential_batch_eval.sh](scripts/sequential_batch_eval.sh).
+
 ---
 
 ## Acknowledgement
