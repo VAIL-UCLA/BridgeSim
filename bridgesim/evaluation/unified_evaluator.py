@@ -226,6 +226,13 @@ def create_model_adapter(args):
             num_groups=num_groups,
         )
 
+    elif model_type == "pdm_lite":
+        from bridgesim.evaluation.models.pdm_lite_adapter import PDMLiteAdapter
+        return PDMLiteAdapter(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+        )
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -242,7 +249,11 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
+        choices=[
+            "uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
+            "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive",
+            "diffusiondrivev2", "openpilot", "alpamayo_r1", "pdm_lite",
+        ],
         help="Model type to evaluate"
     )
     parser.add_argument(

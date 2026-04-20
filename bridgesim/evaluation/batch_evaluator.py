@@ -449,7 +449,7 @@ def main():
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
                                  "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot",
-                                 "alpamayo_r1"],
+                                 "alpamayo_r1", "pdm_lite"],
                         help="Model type")
 
     parser.add_argument('--checkpoint', type=str, required=True,
