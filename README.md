@@ -135,35 +135,7 @@ python bridgesim/evaluation/unified_evaluator.py \
 
 </details>
 
-Or run batch evaluation over all converted scenarios:
-
-```bash
-python bridgesim/evaluation/batch_evaluator.py \
-    --model-type transfuser \
-    --checkpoint ckpts/BridgeSim/navsimv2/transfuser.pth \
-    --scenario-root /path/to/converted/scenarios \
-    --output-dir outputs/ \
-    --traffic-mode log_replay \
-    --eval-mode closed_loop \
-    --resume
-```
-
-<details>
-<summary>Key arguments for <code>batch_evaluator.py</code></summary>
-
-All arguments from `unified_evaluator.py` are supported. Additional batch-specific arguments:
-
-| Argument | Default | Description |
-|---|---|---|
-| `--scenario-root` | *(required)* | Root directory containing all converted scenario subdirectories |
-| `--max-workers` | `1` | Number of parallel worker processes (1 = sequential) |
-| `--resume` | off | Skip scenarios that already have a completed result file |
-
-</details>
-
-Results are saved to `outputs/` by default.
-
-For sequential batch evaluation with aggregated per-scenario metrics, refer to [scripts/sequential_batch_eval.sh](scripts/sequential_batch_eval.sh).
+Or run batch evaluation over all converted scenarios, please use the following sequential batch evaluation with aggregated per-scenario metrics instead of <code>batch_evaluator.py</code> as we observe that this might be too heavy-weight for some systems. Refer to [scripts/sequential_batch_eval.sh](scripts/sequential_batch_eval.sh).
 
 ---
 
