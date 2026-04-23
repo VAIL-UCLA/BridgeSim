@@ -169,7 +169,7 @@ class LEADNavsimAdapter(BaseModelAdapter):
             waypoints = model_output.pred_future_waypoints[0].float().cpu().numpy()  # (n_waypoints, 2)
 
             # Swap columns: model outputs [forward, lateral] but evaluator expects [lateral, forward]
-            waypoints_swapped = np.column_stack([waypoints[:, 1], waypoints[:, 0]])
+            waypoints_swapped = np.column_stack([-waypoints[:, 1], waypoints[:, 0]])
         else:
             # Fallback: use empty trajectory
             waypoints_swapped = np.zeros((8, 2), dtype=np.float32)
