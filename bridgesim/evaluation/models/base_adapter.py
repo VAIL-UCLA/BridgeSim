@@ -158,5 +158,15 @@ class BaseModelAdapter(ABC):
         """
         pass
 
+    def get_controller_config(self) -> Dict[str, Any]:
+        """
+        Optional low-level controller recommendation for this adapter.
+
+        Returns:
+            Dictionary like {"type": "pid" | "pure_pursuit", "params": {...}}
+            or an empty dict to use evaluator defaults.
+        """
+        return {}
+
     def __str__(self):
         return f"{self.__class__.__name__}(checkpoint={self.checkpoint_path})"

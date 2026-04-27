@@ -1679,11 +1679,15 @@ class BaseEvaluator:
 
         plan_traj_subset = plan_traj #[:min(6, len(plan_traj))]
 
+        adapter_target_speed = None
+        if self.cached_parsed_output is not None:
+            adapter_target_speed = self.cached_parsed_output.get('target_speed')
         steer, throttle, brake, control_metadata = self.controller.control_pid(
             plan_traj_subset,
             ego_state['speed'],
             target_ego,
             waypoint_dt=self.sim_dt,  # Trajectory is now interpolated to sim_dt intervals
+            target_speed=adapter_target_speed,
         )
 
         throttle = float(throttle)
@@ -1701,15 +1705,15 @@ class BaseEvaluator:
             )
             self.render_cam_f0_vis(env, frame_id, ego_state, plan_traj)
 
-            # Render DiffusionDriveV2-specific candidate visualizations
+            # Render candidate trajectory visualizations for any model that exposes them
             # Use cached prediction pose (not current ego pose) so candidates stay anchored to prediction point
-            if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter' and self.cached_parsed_output is not None:
+            if self.cached_parsed_output is not None:
                 parsed = self.cached_parsed_output
                 # Use prediction-time pose for candidate transformations
                 pred_pos = self.cached_prediction_position
                 pred_heading = self.cached_prediction_heading
 
-                # Render top-32 candidates visualization
+                # Render top-k candidates visualization
                 if 'trajectory_topk' in parsed:
                     topk_scores = parsed.get('topk_scores', None)
                     self.render_topdown_bev_candidates_topk(
@@ -1872,11 +1876,18 @@ class BaseEvaluator:
             agent_policy=agent_policy
         )
 
-        # Initialize controller based on type
-        if self.controller_type == "pid":
-            self.controller = PIDController()
+        # Initialize controller based on type, allowing adapters to override
+        controller_type = self.controller_type
+        controller_params = {}
+        if hasattr(self.model_adapter, "get_controller_config"):
+            cfg = self.model_adapter.get_controller_config() or {}
+            controller_type = cfg.get("type", controller_type)
+            controller_params = cfg.get("params", {}) or {}
+
+        if controller_type == "pid":
+            self.controller = PIDController(**controller_params)
         else:
-            self.controller = PurePursuitController()
+            self.controller = PurePursuitController(**controller_params)
         
         if self.eval_mode == "open_loop":
             # In open loop, env creation happens inside run but we need to create it early for EPDMS init if needed
@@ -2121,6 +2132,7 @@ class BaseEvaluator:
             # Generate GIFs and MP4s from visualizations
             if self.enable_vis:
                 self.generate_gif(frame_ids, "topdown_visualization.gif", "topdown.png")
+                self.generate_gif(frame_ids, "cam_f0.gif", "cam_f0.jpg")
                 self.generate_mp4(frame_ids, "cam_f0.mp4", "cam_f0.jpg")
                 self.generate_gif(frame_ids, "segmentation_visualization.gif", "segmentation_vis.png")
                 self.generate_gif(frame_ids, "occupancy_visualization.gif", "occupancy_vis.png")
@@ -2131,9 +2143,9 @@ class BaseEvaluator:
                 if hasattr(self, '_final_ego_position') and self._final_ego_position is not None:
                     self.render_replan_summary(env, self._final_ego_position)
 
-                # Generate DiffusionDriveV2-specific candidate visualization GIFs
+                # Generate candidate visualization GIFs for any model that produced them
+                self.generate_gif(frame_ids, "topdown_topk_visualization.gif", "topdown_topk.png")
                 if type(self.model_adapter).__name__ == 'DiffusionDriveV2Adapter':
-                    self.generate_gif(frame_ids, "topdown_topk_visualization.gif", "topdown_topk.png")
                     self.generate_gif(frame_ids, "topdown_finegrained_visualization.gif", "topdown_finegrained.png")
                     self.generate_gif(frame_ids, "topdown_coarse_visualization.gif", "topdown_coarse.png")
 
