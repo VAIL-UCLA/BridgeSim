@@ -17,7 +17,7 @@ BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end au
 
 ## News
 
-- **`2026/04`**: BridgeSim paper and codebase release.
+- **`2026/04`**: BridgeSim paper and codebase release. BridgeSim-NavHard Leaderboard release.
 
 ## ✅ Currently Supported Features
 
@@ -136,6 +136,26 @@ python bridgesim/evaluation/unified_evaluator.py \
 </details>
 
 Or run batch evaluation over all converted scenarios, please use the following sequential batch evaluation with aggregated per-scenario metrics instead of <code>batch_evaluator.py</code> as we observe that this might be too heavy-weight for some systems. Refer to [scripts/sequential_batch_eval.sh](scripts/sequential_batch_eval.sh).
+
+---
+
+## BridgeSim-NavHard Leaderboard
+
+BridgeSim-NavHard Leaderboard serves as a benchmark to examine the generalizability of E2E driving policies without any domain adaptations. All results are reported with a replan rate of 2hz to align with the temporal discretization commonly used for training on NAVSIM/OpenScene, and a simulation horizon of 8 seconds for quantitative comparisons.
+
+| Model | Pretrained Sim | DS | EPDMS | RC | NC | DAC | DDC | TLC | TTC | LK | HC | EC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Human Expert | N/A | 91.14 | 91.96 | 98.86 | 98.18 | 99.23 | 99.76 | 98.62 | 94.55 | 90.22 | 99.10 | 71.44 |
+| | | | | | | | | | | | | |
+| UniAD (CVPR'23) | Bench2Drive | 31.00 | 57.55 | 55.25 | 93.15 | 71.75 | 99.76 | 99.61 | 81.13 | 97.70 | 74.25 | 30.04 |
+| VAD (ICCV'23) | Bench2Drive | 26.25 | 57.60 | 46.76 | 93.29 | 71.22 | 99.76 | 99.68 | 82.31 | 98.67 | 71.13 | 27.67 |
+| | | | | | | | | | | | | |
+| TransFuser (PAMI'23) | NAVSIM | 41.46 | 68.17 | 61.28 | 95.73 | 78.99 | 99.76 | 98.63 | 88.79 | 89.25 | 95.06 | 49.25 |
+| LTF (NeurIPS'24) | NAVSIM | 50.10 | 69.29 | 70.64 | 95.49 | 78.80 | 99.53 | 98.51 | 88.61 | 90.28 | 95.02 | 58.27 |
+| DiffusionDrive (CVPR'25) | NAVSIM | 43.29 | 69.70 | 61.30 | 95.38 | 81.48 | 99.76 | 98.81 | 87.47 | 91.57 | 91.64 | 39.02 |
+| RAP (ICLR'26) | NAVSIM | 52.08 | 72.41 | 70.74 | 95.63 | 85.24 | 99.76 | 99.18 | 88.14 | 84.69 | 92.84 | 48.91 |
+| LEAD (CVPR'26) | NAVSIM | 55.61 | 71.49 | 76.93 | 95.62 | 90.73 | 100.00 | 98.95 | 88.22 | 81.61 | 94.88 | 45.13 |
+| DrivoR (CVPR'26) | NAVSIM | 42.79 | 66.54 | 64.66 | 95.41 | 76.34 | 100.00 | 99.46 | 95.41 | 94.37 | 96.99 | **66.69** |
 
 ---
 
