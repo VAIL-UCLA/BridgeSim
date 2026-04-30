@@ -461,7 +461,7 @@ class _IDMController:
         b: float = 3.0,
         T: float = 1.5,
         s_min: float = 2.0,
-        corridor_half_width: float = 1.5,
+        corridor_half_width: float = 2.0,
     ):
         self.v_desired = v_desired
         self.a_max = a_max
@@ -487,7 +487,7 @@ class _IDMController:
             ego_speed * self.T + ego_speed * rel_speed / (2.0 * math.sqrt(self.a_max * self.b)),
         )
         gap = max(gap, 1e-3)
-        a = self.a_max * (1.0 - v_ratio ** 10 - (s_star / gap) ** 2)
+        a = self.a_max * (1.0 - v_ratio ** 4 - (s_star / gap) ** 2)
         return float(np.clip(a, -self.b, self.a_max))
 
     def find_leading_vehicle(
@@ -510,11 +510,20 @@ class _IDMController:
         for agent in agents:
             delta = agent["position"][:2] - np.array([x, y])
             lon = float(np.dot(delta, fwd))
-            if lon <= -VEHICLE_LENGTH:
+            
+            # Agent must be ahead (with some buffer for vehicle length)
+            if lon <= -VEHICLE_LENGTH * 0.5:
                 continue
-            if abs(float(np.dot(delta, lat))) > self.corridor_half_width:
+                
+            # Lateral distance check to ignore adjacent lanes
+            lat_dist = abs(float(np.dot(delta, lat)))
+            if lat_dist > self.corridor_half_width:
                 continue
-            gap = max(0.0, lon - VEHICLE_LENGTH)
+            
+            # Refined gap calculation: accounting for both vehicles' lengths
+            agent_len = float(agent.get("length", VEHICLE_LENGTH))
+            gap = max(0.0, lon - (VEHICLE_LENGTH * 0.5 + agent_len * 0.5))
+            
             agent_lon_speed = float(np.dot(agent["velocity"][:2], fwd))
             rel = ego_speed - agent_lon_speed
             if gap < best_gap:
@@ -761,7 +770,7 @@ class _CenterlineExtractor:
         return candidates
 
 
-class _PDMLiteScorer:
+class _PDMClosedScorer:
     """
     Scores a simulated world-frame trajectory using EPDMS-compatible metrics.
     Metrics: COL, DAC, DDC, TLC, EP, TTC, HC.
@@ -805,7 +814,7 @@ class _PDMLiteScorer:
         ttc = self._score_ttc(traj_sim, headings, agents)
         hc  = self._score_hc(traj_sim)
 
-        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * hc) / 12.0)
+        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * hc) / 14.0)
 
     def _compute_headings(self, traj: np.ndarray) -> np.ndarray:
         if len(traj) < 2:
@@ -926,6 +935,7 @@ class _PDMLiteScorer:
         for t, pt in enumerate(traj_sim):
             ego_heading = headings[t]
             ego_dir = np.array([math.cos(ego_heading), math.sin(ego_heading)], dtype=float)
+            lat_dir = np.array([-ego_dir[1], ego_dir[0]], dtype=float)
             ego_speed = 0.0
             if t > 0:
                 ego_speed = float(np.linalg.norm(traj_sim[t] - traj_sim[t - 1]) / self.PLANNER_DT)
@@ -933,6 +943,12 @@ class _PDMLiteScorer:
                 agent_pos = (np.asarray(agent["position"][:2], dtype=float)
                              + t * self.PLANNER_DT * np.asarray(agent["velocity"][:2], dtype=float))
                 rel = agent_pos - pt
+                
+                # Filter out agents in adjacent lanes based on lateral distance to ego heading
+                lat_dist = abs(float(np.dot(rel, lat_dir)))
+                if lat_dist > 2.5:
+                    continue
+                    
                 dist = float(np.linalg.norm(rel))
                 if dist < 1e-3:
                     best_ttc = 0.0
@@ -1055,6 +1071,7 @@ class _RichCandidateScorer(_CandidateScorer):
         for t, pt in enumerate(traj_sim):
             ego_heading = headings[t]
             ego_dir = np.array([math.cos(ego_heading), math.sin(ego_heading)], dtype=float)
+            lat_dir = np.array([-ego_dir[1], ego_dir[0]], dtype=float)
             ego_speed = 0.0
             if t > 0:
                 ego_speed = float(np.linalg.norm(traj_sim[t] - traj_sim[t - 1]) / self.PLANNER_DT)
@@ -1062,6 +1079,12 @@ class _RichCandidateScorer(_CandidateScorer):
                 idx = min(t, len(actor["positions"]) - 1)
                 pos = np.asarray(actor["positions"][idx], dtype=float)
                 rel = pos - (pt - self.world_to_sim_offset)
+                
+                # Filter out agents in adjacent lanes based on lateral distance to ego heading
+                lat_dist = abs(float(np.dot(rel, lat_dir)))
+                if lat_dist > 2.5:
+                    continue
+                    
                 if float(np.dot(rel, ego_dir)) <= 0.0:
                     continue
                 dist = max(1e-3, float(np.linalg.norm(rel)) - 0.5 * actor["lengths"][idx])
@@ -1110,13 +1133,13 @@ class _RichCandidateScorer(_CandidateScorer):
         return 0.0
 
 
-class PDMLiteAdapter(BaseModelAdapter):
+class PDMClosedAdapter(BaseModelAdapter):
     """
-    BridgeSim adapter for PDM-lite (rule-based, no checkpoint required).
+    BridgeSim adapter for PDM-Closed (rule-based, no checkpoint required).
 
     Usage:
         python bridgesim/evaluation/unified_evaluator.py \\
-            --model-type pdm_lite --checkpoint none \\
+            --model-type pdm_closed --checkpoint none \\
             --scenario-path /path/to/scenario --output-dir outputs/
     """
 
@@ -1182,7 +1205,7 @@ class PDMLiteAdapter(BaseModelAdapter):
         return {}
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
-        # Planning is state-based, but visualization needs at least a front view.
+        # PDM-lite is state-based, but we provide cameras for visualization/GIFs.
         return {
             "CAM_F0": NAVSIM_CAM_CONFIGS["CAM_F0"],
             "CAM_THIRD_PERSON": NAVSIM_CAM_CONFIGS["CAM_THIRD_PERSON"],
@@ -1267,7 +1290,7 @@ class PDMLiteAdapter(BaseModelAdapter):
         return {
             "ego_state": ego_state,
             "agents": agents,
-            "red_light_lanes": red_light_lanes,
+            "tl_states": red_light_lanes,
             "candidate_paths": candidate_paths,
             "centerline": centerline,
             "frame_id": frame_id,
@@ -1276,7 +1299,7 @@ class PDMLiteAdapter(BaseModelAdapter):
     def run_inference(self, model_input: Any) -> Any:
         ego_state = model_input["ego_state"]
         agents = model_input["agents"]
-        red_light_lanes = model_input["red_light_lanes"]
+        tl_states = model_input["tl_states"]
         centerline = model_input["centerline"]
 
         candidates = model_input.get("candidate_paths") or []
@@ -1295,7 +1318,7 @@ class PDMLiteAdapter(BaseModelAdapter):
                 world_to_sim_offset=self._world_to_sim_offset,
             )
         else:
-            scorer = _PDMLiteScorer(
+            scorer = _PDMClosedScorer(
                 all_lanes=self._all_lanes,
                 all_lane_bounds=self._all_lane_bounds,
                 world_to_sim_offset=self._world_to_sim_offset,
@@ -1309,7 +1332,7 @@ class PDMLiteAdapter(BaseModelAdapter):
         if speed_limit_mps is not None and speed_limit_mps > 1.0:
             self._idm.v_desired = 0.95 * speed_limit_mps
         for path in candidates:
-            stop_distance_m = self._estimate_stop_distance(path, red_light_lanes)
+            stop_distance_m = self._estimate_stop_distance(path, tl_states)
             traj = self._simulator.simulate(
                 path,
                 ego_state,
@@ -1325,16 +1348,16 @@ class PDMLiteAdapter(BaseModelAdapter):
                         traj,
                         ego_state,
                         agents,
-                        red_light_lanes,
+                        tl_states,
                         predicted_actors=predicted_actors,
                         scenario_context=scenario_context,
                     )
                 )
             else:
-                scores.append(scorer.score(traj, red_light_lanes, agents))
+                scores.append(scorer.score(traj, tl_states, agents))
 
         best_idx = int(np.argmax(scores))
-        print(f"[PDM-Lite] scorer={'rich' if use_live_scorer else 'pdm_lite'} "
+        print(f"[PDM-Closed] scorer={'rich' if use_live_scorer else 'pdm_closed'} "
               f"candidates={len(candidates)} best_idx={best_idx} "
               f"best_score={scores[best_idx]:.4f}")
         return {
@@ -1409,7 +1432,7 @@ class PDMLiteAdapter(BaseModelAdapter):
         for obj_id, track in scenario_data["tracks"].items():
             if obj_id == sdc_id:
                 continue
-            if track["type"] not in ("VEHICLE", "CYCLIST", "PEDESTRIAN"):
+            if track["type"] not in ("VEHICLE", "CYCLIST"):
                 continue
             pos_arr   = track["state"]["position"]
             valid_arr = track["state"]["valid"]

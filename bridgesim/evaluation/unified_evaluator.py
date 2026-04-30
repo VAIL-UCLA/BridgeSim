@@ -226,9 +226,16 @@ def create_model_adapter(args):
             num_groups=num_groups,
         )
 
-    elif model_type == "pdm_lite":
-        from bridgesim.evaluation.models.pdm_lite_adapter import PDMLiteAdapter
-        return PDMLiteAdapter(
+    elif model_type == "pdm_closed":
+        from bridgesim.evaluation.models.pdm_closed_adapter import PDMClosedAdapter
+        return PDMClosedAdapter(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+        )
+
+    elif model_type == "pdm_closed2":
+        from bridgesim.evaluation.models.pdm_closed_adapter2 import PDMClosedAdapter2
+        return PDMClosedAdapter2(
             checkpoint_path=args.checkpoint,
             config_path=args.config,
         )
@@ -252,7 +259,7 @@ def main():
         choices=[
             "uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
             "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive",
-            "diffusiondrivev2", "openpilot", "alpamayo_r1", "pdm_lite",
+            "diffusiondrivev2", "openpilot", "alpamayo_r1", "pdm_closed", "pdm_closed2",
         ],
         help="Model type to evaluate"
     )
