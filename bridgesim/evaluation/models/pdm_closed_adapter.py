@@ -812,9 +812,10 @@ class _PDMClosedScorer:
         tlc = self._score_tlc(traj_sim, headings, tl_states)
         ep  = self._score_ep(traj_sim)
         ttc = self._score_ttc(traj_sim, headings, agents)
+        lk  = self._score_lk(traj_sim, headings)
         hc  = self._score_hc(traj_sim)
 
-        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * hc) / 14.0)
+        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * lk + 2.0 * hc) / 14.0)
 
     def _compute_headings(self, traj: np.ndarray) -> np.ndarray:
         if len(traj) < 2:
@@ -1038,7 +1039,7 @@ class _RichCandidateScorer(_CandidateScorer):
 
         gated = col * dac * ddc * tlc
         comfort = (hc + ec) / 2.0
-        weighted = (5.0 * progress + 5.0 * ttc + 2.0 * comfort) / 12.0
+        weighted = (5.0 * progress + 5.0 * ttc + 2.0 * lk + 2.0 * comfort) / 14.0
         score = float(gated * weighted)
 
         if scenario_context:
