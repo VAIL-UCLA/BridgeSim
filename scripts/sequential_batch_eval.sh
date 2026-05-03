@@ -23,21 +23,17 @@ set -euo pipefail
 
 # ============================ CONFIG ==========================================
 # Required
-DATASET_PATH="$(pwd)/local_scenarios/navhard"
-OUTPUT_PATH="$(pwd)/outputs/pdm_closed_batch"
+DATASET_PATH="/path/to/dataset"
+OUTPUT_PATH="/path/to/output"
 
 # Arguments passed verbatim to bridgesim/evaluation/unified_evaluator.py
 # (everything except --scenario-path and --output-dir, which this script sets).
 # Edit these to match the model you want to evaluate.
 EVAL_ARGS=(
-  --model-type pdm_closed
-  --checkpoint none
+  --model-type transfuser
+  --checkpoint ckpts/BridgeSim/navsimv2/transfuser.pth
   --traffic-mode log_replay
   --eval-mode closed_loop
-  --replan-rate 5
-  --ego-replay-frames 20
-  --eval-frames 80
-  --enable-vis
 )
 # ==============================================================================
 
