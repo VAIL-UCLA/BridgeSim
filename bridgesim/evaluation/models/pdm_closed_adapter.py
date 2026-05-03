@@ -33,6 +33,9 @@ CYCLIST_WIDTH  = 0.8
 PEDESTRIAN_LENGTH = 0.8
 PEDESTRIAN_WIDTH  = 0.8
 
+# Gap threshold (m) between bounding boxes below which NC = 0.5 (near-miss partial credit)
+_NEAR_MISS_GAP = 0.5
+
 
 def _wrap_to_pi(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
@@ -70,6 +73,24 @@ class _LiveRoutePlanner:
         if not route_lanes:
             return self._fallback_paths(ego_state, target_waypoint_world)
 
+        # Derive offsets from actual lane width to keep all candidates in drivable area.
+        lane_width = 3.5  # default
+        for chain in route_lanes:
+            for lane in chain:
+                w = getattr(lane, 'width', None)
+                if w is not None and float(w) > 0.5:
+                    lane_width = float(w)
+                    break
+            else:
+                continue
+            break
+        half_w = lane_width / 2.0
+        adaptive_offsets = (
+            -0.70 * half_w, -0.40 * half_w, -0.20 * half_w,
+            0.0,
+            0.20 * half_w,  0.40 * half_w,  0.70 * half_w,
+        )
+
         base_paths = []
         for lane_chain in route_lanes:
             base_sim = self._sample_lane_chain(lane_chain, ego_position_sim)
@@ -81,7 +102,7 @@ class _LiveRoutePlanner:
 
         candidates: List[np.ndarray] = []
         for i, base in enumerate(base_paths):
-            offsets = (0.0,) if i > 0 else self.lateral_offsets
+            offsets = (0.0,) if i > 0 else adaptive_offsets
             candidates.extend(self._offset_path(base, offsets))
 
         return candidates[:7]
@@ -285,26 +306,40 @@ class _CandidateScorer:
     def _score_dac(self, traj_sim: np.ndarray) -> float:
         if not self.all_lanes:
             return 1.0
+        if len(traj_sim) >= 2:
+            diffs = np.diff(traj_sim, axis=0)
+            h = np.arctan2(diffs[:, 1], diffs[:, 0])
+            headings = np.append(h, h[-1])
+        else:
+            headings = np.zeros(len(traj_sim))
         valid = 0
-        for pt in traj_sim:
-            p = Point(float(pt[0]), float(pt[1]))
+        for t, pt in enumerate(traj_sim):
             nearby = self._nearby_lane_indices(pt[0], pt[1])
-            if any(self.all_lanes[idx][1].contains(p) for idx in nearby):
+            ego_poly = self._ego_polygon(float(pt[0]), float(pt[1]), float(headings[t]))
+            corners = [Point(c) for c in ego_poly.exterior.coords[:-1]]
+            if all(
+                any(self.all_lanes[idx][1].contains(corner) for idx in nearby)
+                for corner in corners
+            ):
                 valid += 1
         return valid / max(len(traj_sim), 1)
 
     def _score_ddc(self, traj_sim: np.ndarray, headings: np.ndarray) -> float:
         if not self.all_lanes:
             return 1.0
+        result = 1.0
         for t in range(0, len(traj_sim), 2):
             lane = self._nearest_lane(traj_sim[t])
             if lane is None:
                 continue
             long, _ = lane.local_coordinates(traj_sim[t])
             lane_heading = lane.heading_theta_at(float(np.clip(long, 0.0, lane.length)))
-            if abs(_wrap_to_pi(headings[t] - lane_heading)) > math.pi / 2:
+            diff_abs = abs(_wrap_to_pi(headings[t] - lane_heading))
+            if diff_abs > math.pi / 2:
                 return 0.0
-        return 1.0
+            elif diff_abs > math.pi * 5.0 / 12.0 and result > 0.5:  # > 75°: partial credit
+                result = 0.5
+        return result
 
     def _score_tlc(self, traj_sim: np.ndarray, headings: np.ndarray, red_light_lanes: set) -> float:
         if not red_light_lanes or not self.all_lanes:
@@ -416,8 +451,7 @@ class _CandidateScorer:
     def _score_progress(self, traj_sim: np.ndarray) -> float:
         if len(traj_sim) < 2:
             return 0.0
-        dist = float(np.sum(np.linalg.norm(np.diff(traj_sim, axis=0), axis=1)))
-        return min(1.0, dist / 20.0)
+        return min(float(np.linalg.norm(traj_sim[-1] - traj_sim[0])) / 30.0, 1.0)
 
     def _nearest_lane(self, pt: np.ndarray) -> Optional[Any]:
         nearby = self._nearby_lane_indices(pt[0], pt[1])
@@ -773,8 +807,10 @@ class _CenterlineExtractor:
 class _PDMClosedScorer:
     """
     Scores a simulated world-frame trajectory using EPDMS-compatible metrics.
-    Metrics: COL, DAC, DDC, TLC, EP, TTC, HC.
-    Combined: (COL × DAC × DDC × TLC) × (5·EP + 5·TTC + 2·HC) / 12
+    Metrics: COL, DAC, DDC, TLC, EP, TTC, LK, HC, EC.
+    Formula: (COL × DAC × DDC × TLC) × (5·EP + 5·TTC + 2·LK + 2·HC + 2·EC) / 16
+    Matches the BridgeSim evaluator formula (epdms_scorer_md.py weights 5+5+2+2+2=16).
+    COL and DDC use partial credit {0, 0.5, 1} to rank near-miss/near-violation candidates.
     """
 
     PLANNER_DT      = 0.5
@@ -783,6 +819,8 @@ class _PDMClosedScorer:
     MAX_ACCEL       = 4.89
     TTC_SAFE        = 3.0
     TTC_DANGER      = 0.5
+    MAX_EXT_ACCEL_DELTA   = 0.7
+    MAX_EXT_YAW_RATE_DELTA = 0.1
 
     def __init__(
         self,
@@ -799,6 +837,7 @@ class _PDMClosedScorer:
         traj_world: np.ndarray,
         tl_states: set,
         agents: List[Dict[str, Any]],
+        ego_state: Optional[Dict[str, Any]] = None,
     ) -> float:
         T = len(traj_world)
         if T == 0:
@@ -814,8 +853,9 @@ class _PDMClosedScorer:
         ttc = self._score_ttc(traj_sim, headings, agents)
         lk  = self._score_lk(traj_sim, headings)
         hc  = self._score_hc(traj_sim)
+        ec  = self._score_ec(traj_world, ego_state)
 
-        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * lk + 2.0 * hc) / 14.0)
+        return float(col * dac * ddc * tlc * (5.0 * ep + 5.0 * ttc + 2.0 * lk + 2.0 * hc + 2.0 * ec) / 16.0)
 
     def _compute_headings(self, traj: np.ndarray) -> np.ndarray:
         if len(traj) < 2:
@@ -865,17 +905,28 @@ class _PDMClosedScorer:
     def _score_dac(self, traj: np.ndarray) -> float:
         if not self.all_lanes:
             return 1.0
+        if len(traj) >= 2:
+            diffs = np.diff(traj, axis=0)
+            h = np.arctan2(diffs[:, 1], diffs[:, 0])
+            headings = np.append(h, h[-1])
+        else:
+            headings = np.zeros(len(traj))
         valid = 0
-        for pt in traj:
+        for t, pt in enumerate(traj):
             nearby = self._nearby_lane_indices(pt[0], pt[1])
-            p = Point(pt[0], pt[1])
-            if any(self.all_lanes[i][1].contains(p) for i in nearby):
+            ego_poly = self._ego_polygon(pt[0], pt[1], headings[t])
+            corners = [Point(c) for c in ego_poly.exterior.coords[:-1]]
+            if all(
+                any(self.all_lanes[i][1].contains(corner) for i in nearby)
+                for corner in corners
+            ):
                 valid += 1
         return valid / len(traj)
 
     def _score_ddc(self, traj: np.ndarray, headings: np.ndarray, dac: float) -> float:
         if dac == 0.0 or not self.all_lanes:
             return 1.0
+        result = 1.0
         for t in range(0, len(traj), 5):
             x, y = traj[t, 0], traj[t, 1]
             nearby = self._nearby_lane_indices(x, y)
@@ -894,9 +945,12 @@ class _PDMClosedScorer:
                 lh = math.atan2(lh_vec[1], lh_vec[0])
                 diff = abs(headings[t] - lh)
                 diff = (diff + math.pi) % (2 * math.pi) - math.pi
-                if abs(diff) > math.pi / 2:
+                diff_abs = abs(diff)
+                if diff_abs > math.pi / 2:
                     return 0.0
-        return 1.0
+                elif diff_abs > math.pi * 5.0 / 12.0 and result > 0.5:  # > 75°: partial credit
+                    result = 0.5
+        return result
 
     def _score_tlc(self, traj: np.ndarray, headings: np.ndarray, tl_states: set) -> float:
         if not tl_states or not self.all_lanes:
@@ -919,6 +973,7 @@ class _PDMClosedScorer:
     def _score_col(self, traj: np.ndarray, headings: np.ndarray, agents: List[Dict[str, Any]]) -> float:
         if not agents:
             return 1.0
+        result = 1.0
         for t, pt in enumerate(traj):
             ego_poly = self._ego_polygon(pt[0], pt[1], headings[t])
             dt_future = t * self.PLANNER_DT
@@ -927,7 +982,9 @@ class _PDMClosedScorer:
                 a_poly = self._ego_polygon(a_pos[0], a_pos[1], agent["heading"])
                 if ego_poly.intersects(a_poly):
                     return 0.0
-        return 1.0
+                elif result > 0.5 and ego_poly.distance(a_poly) < _NEAR_MISS_GAP:
+                    result = 0.5
+        return result
 
     def _score_ttc(self, traj_sim: np.ndarray, headings: np.ndarray, agents: List[Dict[str, Any]]) -> float:
         if not agents:
@@ -970,8 +1027,7 @@ class _PDMClosedScorer:
     def _score_ep(self, traj: np.ndarray) -> float:
         if len(traj) < 2:
             return 0.0
-        dist = float(np.linalg.norm(traj[-1] - traj[0]))
-        return min(dist / (3.0 * len(traj)), 1.0)
+        return min(float(np.linalg.norm(traj[-1] - traj[0])) / 30.0, 1.0)
 
     def _score_lk(self, traj: np.ndarray, headings: np.ndarray) -> float:
         if not self.all_lanes:
@@ -1000,6 +1056,27 @@ class _PDMClosedScorer:
         if len(accels) > 0 and float(np.max(accels)) > self.MAX_ACCEL:
             return 0.0
         return 1.0
+
+    def _score_ec(self, traj_world: np.ndarray, ego_state: Optional[Dict[str, Any]]) -> float:
+        if ego_state is None or len(traj_world) < 2:
+            return 1.0
+        initial_speed = float(np.linalg.norm(np.asarray(ego_state["velocity"][:2], dtype=float)))
+        prev_acc = float(np.linalg.norm(np.asarray(ego_state.get("acceleration", [0.0, 0.0])[:2], dtype=float)))
+
+        speeds = [initial_speed]
+        speeds.extend(np.linalg.norm(np.diff(traj_world, axis=0), axis=1) / self.PLANNER_DT)
+        accels = np.diff(np.asarray(speeds)) / self.PLANNER_DT
+        accel_delta = 0.0 if len(accels) == 0 else float(abs(accels[0] - prev_acc))
+
+        initial_yaw_rate = float(abs(np.asarray(ego_state["angular_velocity"])[2])) if "angular_velocity" in ego_state else 0.0
+        if len(traj_world) < 3:
+            yaw_delta = initial_yaw_rate
+        else:
+            headings = np.arctan2(np.diff(traj_world[:, 1]), np.diff(traj_world[:, 0]))
+            yaw_rates = np.abs(np.diff(headings) / self.PLANNER_DT)
+            yaw_delta = float(abs(yaw_rates[0] - initial_yaw_rate)) if len(yaw_rates) else initial_yaw_rate
+
+        return 1.0 if accel_delta <= self.MAX_EXT_ACCEL_DELTA and yaw_delta <= self.MAX_EXT_YAW_RATE_DELTA else 0.0
 
 
 class _RichCandidateScorer(_CandidateScorer):
@@ -1038,8 +1115,7 @@ class _RichCandidateScorer(_CandidateScorer):
         progress = self._score_progress(traj_sim)
 
         gated = col * dac * ddc * tlc
-        comfort = (hc + ec) / 2.0
-        weighted = (5.0 * progress + 5.0 * ttc + 2.0 * lk + 2.0 * comfort) / 14.0
+        weighted = (5.0 * progress + 5.0 * ttc + 2.0 * lk + 2.0 * hc + 2.0 * ec) / 16.0
         score = float(gated * weighted)
 
         if scenario_context:
@@ -1051,6 +1127,7 @@ class _RichCandidateScorer(_CandidateScorer):
     def _score_collision_rollout(self, traj_sim: np.ndarray, headings: np.ndarray, predicted_actors: List[Dict[str, Any]]) -> float:
         if not predicted_actors:
             return 1.0
+        result = 1.0
         for t, pt in enumerate(traj_sim):
             ego_poly = self._ego_polygon(pt[0], pt[1], headings[t])
             actor_t = min(t, max((len(a["positions"]) - 1 for a in predicted_actors), default=0))
@@ -1063,7 +1140,9 @@ class _RichCandidateScorer(_CandidateScorer):
                 poly = self._ego_polygon(pos[0] + self.world_to_sim_offset[0], pos[1] + self.world_to_sim_offset[1], heading, length, width)
                 if ego_poly.intersects(poly):
                     return 0.0
-        return 1.0
+                elif result > 0.5 and ego_poly.distance(poly) < _NEAR_MISS_GAP:
+                    result = 0.5
+        return result
 
     def _score_ttc_rollout(self, traj_sim: np.ndarray, headings: np.ndarray, predicted_actors: List[Dict[str, Any]]) -> float:
         if not predicted_actors:
@@ -1155,6 +1234,7 @@ class PDMClosedAdapter(BaseModelAdapter):
         self._extractor: Optional[_CenterlineExtractor] = None
         self._planner: Optional[_LiveRoutePlanner] = None
         self._idm: Optional[_IDMController] = None
+        self._cautious_idm: Optional[_IDMController] = None
         self._simulator: Optional[_KinematicBicycleSimulator] = None
         self._sdc_id: Optional[str] = None
         self._all_lanes: list = []
@@ -1180,12 +1260,20 @@ class PDMClosedAdapter(BaseModelAdapter):
             sample_spacing=cfg.get("resample_spacing", 0.5),
             lateral_offsets=tuple(cfg.get("lateral_offsets", [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5])),
         )
+        v_desired = cfg.get("v_desired", 8.33)
         self._idm = _IDMController(
-            v_desired=cfg.get("v_desired", 8.33),
+            v_desired=v_desired,
             a_max=cfg.get("a_max", 2.0),
             b=cfg.get("b", 3.0),
             T=cfg.get("T", 1.0),
             s_min=cfg.get("s_min", 2.0),
+        )
+        self._cautious_idm = _IDMController(
+            v_desired=v_desired * 0.6,
+            a_max=1.5,
+            b=cfg.get("b", 3.0),
+            T=2.0,
+            s_min=3.0,
         )
         self._simulator = _KinematicBicycleSimulator(
             wheelbase=cfg.get("wheelbase", 2.8),
@@ -1332,35 +1420,39 @@ class PDMClosedAdapter(BaseModelAdapter):
         speed_limit_mps = self._estimate_speed_limit_mps()
         if speed_limit_mps is not None and speed_limit_mps > 1.0:
             self._idm.v_desired = 0.95 * speed_limit_mps
+            self._cautious_idm.v_desired = 0.6 * speed_limit_mps
+
+        idm_policies = [self._idm, self._cautious_idm]
         for path in candidates:
             stop_distance_m = self._estimate_stop_distance(path, tl_states)
-            traj = self._simulator.simulate(
-                path,
-                ego_state,
-                agents,
-                self._idm,
-                speed_limit_mps=speed_limit_mps,
-                stop_distance_m=stop_distance_m,
-            )
-            simulated.append(traj)
-            if use_live_scorer:
-                scores.append(
-                    scorer.score(
-                        traj,
-                        ego_state,
-                        agents,
-                        tl_states,
-                        predicted_actors=predicted_actors,
-                        scenario_context=scenario_context,
-                    )
+            for idm_policy in idm_policies:
+                traj = self._simulator.simulate(
+                    path,
+                    ego_state,
+                    agents,
+                    idm_policy,
+                    speed_limit_mps=speed_limit_mps,
+                    stop_distance_m=stop_distance_m,
                 )
-            else:
-                scores.append(scorer.score(traj, tl_states, agents))
+                simulated.append(traj)
+                if use_live_scorer:
+                    scores.append(
+                        scorer.score(
+                            traj,
+                            ego_state,
+                            agents,
+                            tl_states,
+                            predicted_actors=predicted_actors,
+                            scenario_context=scenario_context,
+                        )
+                    )
+                else:
+                    scores.append(scorer.score(traj, tl_states, agents, ego_state))
 
         best_idx = int(np.argmax(scores))
         print(f"[PDM-Closed] scorer={'rich' if use_live_scorer else 'pdm_closed'} "
-              f"candidates={len(candidates)} best_idx={best_idx} "
-              f"best_score={scores[best_idx]:.4f}")
+              f"candidates={len(candidates)} policies=2 proposals={len(simulated)} "
+              f"best_idx={best_idx} best_score={scores[best_idx]:.4f}")
         return {
             "trajectory_world": simulated[best_idx],
             "all_simulated_world": simulated,
@@ -1677,7 +1769,11 @@ class PDMClosedAdapter(BaseModelAdapter):
         if speed_limit is None:
             return None
         # MetaDrive lanes store speed limits in km/h.
-        return float(speed_limit) / 3.6
+        # Default sentinel is 1000 km/h; treat anything >=200 km/h as "no data".
+        val = float(speed_limit) / 3.6
+        if val >= 55.0:
+            return None
+        return val
 
     def _estimate_stop_distance(self, path: np.ndarray, red_light_lanes: set) -> Optional[float]:
         if not red_light_lanes or not self._all_lanes or len(path) == 0:

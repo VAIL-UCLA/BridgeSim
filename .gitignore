@@ -67,7 +67,7 @@ env.bak/
 .DS_Store
 CLAUDE.md
 docs/superpowers
-docs/pdm_lite_reference_comparison.md
+
 
 # System files
 Thumbs.db
