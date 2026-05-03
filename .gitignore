@@ -10,6 +10,8 @@ metadrive_evaluation/data
 **/Bench2Drive-mini/
 **/Bench2Drive-Map/
 **/converted_scenarios/
+local_scenarios/navhard
+outputs/
 
 # Images
 *.png
@@ -63,6 +65,9 @@ env.bak/
 *~
 .claude
 .DS_Store
+CLAUDE.md
+docs/superpowers
+
 
 # System files
 Thumbs.db
