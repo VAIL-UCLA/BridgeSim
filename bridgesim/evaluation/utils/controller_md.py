@@ -30,7 +30,7 @@ class PID(object):
 class PIDController(object):
     
     def __init__(self, turn_KP=3, turn_KI=0.0, turn_KD=0.0, turn_n=10, speed_KP=5.0, speed_KI=0.0,speed_KD=0.0, speed_n = 10, max_throttle=1.0, brake_speed=0.5, brake_ratio=2.0, clip_delta=1.0, aim_dist=4.0, angle_thresh=0.3, dist_thresh=10):
-        
+
         self.turn_controller = PID(K_P=turn_KP, K_I=turn_KI, K_D=turn_KD, n=turn_n)
         self.speed_controller = PID(K_P=speed_KP, K_I=speed_KI, K_D=speed_KD, n=speed_n)
         # Values from MetaDrive PID controller
@@ -44,11 +44,13 @@ class PIDController(object):
         self.angle_thresh = angle_thresh
         self.dist_thresh = dist_thresh
 
-    def control_pid(self, waypoints, speed, target):
+    def control_pid(self, waypoints, speed, target, waypoint_dt=None, target_speed=None):
         ''' Predicts vehicle control with a PID controller.
         Args:
             waypoints (tensor): output of self.plan()
             speed (tensor): speedometer input
+            target_speed (float, optional): explicit longitudinal target speed (m/s).
+                If provided, overrides waypoint-spacing-derived desired speed.
         '''
 
         # iterate over vectors between predicted waypoints
@@ -57,15 +59,19 @@ class PIDController(object):
         desired_speed = 0
         aim = waypoints[0]
         for i in range(num_pairs):
-            # magnitude of vectors, used for speed
-            desired_speed += np.linalg.norm(
-                    waypoints[i+1] - waypoints[i]) * 8.0 / num_pairs
+            # magnitude of vectors, used for speed (only when target_speed not provided)
+            if target_speed is None:
+                desired_speed += np.linalg.norm(
+                        waypoints[i+1] - waypoints[i]) * 8.0 / num_pairs
 
             # norm of vector midpoints, used for steering
             norm = np.linalg.norm((waypoints[i+1] + waypoints[i]) / 2.0)
             if abs(self.aim_dist-best_norm) > abs(self.aim_dist-norm):
                 aim = waypoints[i]
                 best_norm = norm
+
+        if target_speed is not None:
+            desired_speed = float(target_speed)
 
         aim_last = waypoints[-1] - waypoints[-2]
 
@@ -105,7 +111,7 @@ class PIDController(object):
             # 'wp_1': tuple(waypoints[0].astype(np.float64)),
             'aim': tuple(aim.astype(np.float64)),
             'target': tuple(target.astype(np.float64)),
-            'desired_speed': float(desired_speed.astype(np.float64)),
+            'desired_speed': float(desired_speed),
             'angle': float(angle.astype(np.float64)),
             'angle_last': float(angle_last.astype(np.float64)),
             'angle_target': float(angle_target.astype(np.float64)),
@@ -187,7 +193,7 @@ class PurePursuitController(object):
         self.brake_ratio = brake_ratio
         self.clip_delta = clip_delta
 
-    def control_pid(self, waypoints, speed, target, waypoint_dt=0.1):
+    def control_pid(self, waypoints, speed, target, waypoint_dt=0.1, target_speed=None):
         """
         Compute control commands using Pure Pursuit for steering.
 

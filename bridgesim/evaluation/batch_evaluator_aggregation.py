@@ -384,17 +384,22 @@ class BatchEvaluator:
         import csv as csv_mod
 
         csv_path = self.output_root / "batch_driving_score_summary.csv"
+        scenario_output_root = self.output_root / self._get_output_subdir()
         columns = ['scenario', 'DS', 'EPDMS_no_ep', 'RC', 'NC', 'DAC', 'DDC', 'TL', 'TTC', 'LK', 'HC', 'EC']
 
         rows = []
         totals = {col: [] for col in columns if col != 'scenario'}
 
-        for scenario_name, result in self.results['scenarios'].items():
-            if result['status'] != 'success':
+        if not scenario_output_root.exists():
+            return
+
+        for scenario_dir in sorted(scenario_output_root.iterdir()):
+            if not scenario_dir.is_dir():
                 continue
 
             # Read AVERAGE row from driving_score_summary.csv
-            summary_csv = self.output_root / self._get_output_subdir() / scenario_name / "driving_score_summary.csv"
+            scenario_name = scenario_dir.name
+            summary_csv = scenario_dir / "driving_score_summary.csv"
             if not summary_csv.exists():
                 continue
 
@@ -441,6 +446,33 @@ class BatchEvaluator:
         print(f"  HC:           {avg_row.get('HC', 'N/A')}")
         print(f"  EC:           {avg_row.get('EC', 'N/A')}")
         print(f"{'='*60}")
+
+        # Top 10 worst performers by DS (lowest first)
+        scored = []
+        for r in rows:
+            try:
+                scored.append((float(r.get('DS', '')), r))
+            except (ValueError, TypeError):
+                continue
+        scored.sort(key=lambda x: x[0])
+        worst = scored[:10]
+
+        if worst:
+            print(f"\nTop {len(worst)} Worst Scenarios (by DS)")
+            print(f"{'='*60}")
+            print(f"{'Rank':<5}{'Scenario':<40}{'DS':>10}{'RC':>10}")
+            print(f"{'-'*60}")
+            for i, (ds, r) in enumerate(worst, 1):
+                name = r.get('scenario', '')
+                if len(name) > 38:
+                    name = name[:35] + '...'
+                rc = r.get('RC', 'N/A')
+                try:
+                    rc_str = f"{float(rc):.4f}"
+                except (ValueError, TypeError):
+                    rc_str = str(rc)
+                print(f"{i:<5}{name:<40}{ds:>10.4f}{rc_str:>10}")
+            print(f"{'='*60}")
 
 
 def main():

@@ -226,6 +226,20 @@ def create_model_adapter(args):
             num_groups=num_groups,
         )
 
+    elif model_type == "pdm_closed":
+        from bridgesim.evaluation.models.pdm_closed_adapter import PDMClosedAdapter
+        return PDMClosedAdapter(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+        )
+
+    elif model_type == "pdm_closed2":
+        from bridgesim.evaluation.models.pdm_closed_adapter2 import PDMClosedAdapter2
+        return PDMClosedAdapter2(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+        )
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -242,7 +256,11 @@ def main():
         "--model-type",
         type=str,
         required=True,
-        choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor", "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot", "alpamayo_r1"],
+        choices=[
+            "uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
+            "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive",
+            "diffusiondrivev2", "openpilot", "alpamayo_r1", "pdm_closed", "pdm_closed2",
+        ],
         help="Model type to evaluate"
     )
     parser.add_argument(
