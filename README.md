@@ -56,6 +56,8 @@ conda activate mdsn
 
 pip install -e nuplan-devkit/
 pip install -e metadrive/.[cuda]
+# Tip: If you are using zsh, please use:
+# pip install -e 'metadrive/.[cuda]'
 pip install -e .
 ```
 
@@ -69,7 +71,7 @@ pip install -e .
 ### Step 2: Download Checkpoints
 
 ```bash
-huggingface-cli download sethzhao506ucla/BridgeSim --local-dir ckpts/BridgeSim
+hf download sethzhao506ucla/BridgeSim --local-dir ckpts/BridgeSim
 ```
 
 ### Step 3: Convert NavHard Scenarios
