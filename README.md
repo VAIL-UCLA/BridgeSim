@@ -79,7 +79,7 @@ hf download sethzhao506ucla/BridgeSim --local-dir ckpts/BridgeSim
 ```bash
 python converters/openscene/convert_openscene_with_filter.py \
     --scene-filter converters/openscene/filter/navhard_two_stage.yaml \
-    --input-dir /path/to/navsim_logs \
+    --input-dir /path/to/navsim_logs/test \
     --output-dir /path/to/output \
     --map-root /path/to/maps \
     --num-future-frames-extract 40 \ #future 20 seconds since navsim sampling is 2hz
