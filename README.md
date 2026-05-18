@@ -164,7 +164,7 @@ BridgeSim-NavHard Leaderboard serves as a benchmark to examine the generalizabil
 
 The codebase is built upon [MetaDrive](https://github.com/metadriverse/metadrive) and [ScenarioNet](https://github.com/metadriverse/scenarionet). We also thank the authors of [Bench2Drive](https://arxiv.org/abs/2406.03877), [NavSim](https://github.com/autonomousvision/navsim), [UniAD](https://github.com/OpenDriveLab/UniAD), [DiffusionDrive](https://github.com/hustvl/DiffusionDrive), and [ADV-BMT](https://github.com/Yuxin45/Adv-BMT) for releasing their codebases.
 
-We also thank other development team members for adding features and functionalities: [Jason Zhang](https://www.linkedin.com/in/jasonszhang/), [Aidan Bayer-Calvert](https://www.linkedin.com/in/aidan-bayer-calvert/), [Charlton Shih](https://charltonshih.com/).
+We also thank other development team members for adding features and functionalities: [Jason Zhang](https://www.linkedin.com/in/jasonszhang/), [Aidan Bayer-Calvert](https://www.linkedin.com/in/aidan-bayer-calvert/), [Charlton Shih](https://www.linkedin.com/in/charlton-shih/).
 
 ## Citation
 
