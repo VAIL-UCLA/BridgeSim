@@ -65,7 +65,16 @@ class BatchEvaluator:
                  trajectory_scorer: str = None,
                  num_groups: int = None,
                  num_proposals: int = None,
-                 v2_scorer_checkpoint: str = None):
+                 v2_scorer_checkpoint: str = None,
+                 enable_runtime_lidar: bool = False,
+                 runtime_lidar_num_lasers: int = 720,
+                 runtime_lidar_distance: float = 50.0,
+                 runtime_lidar_height: float = 1.2,
+                 enable_runtime_point_cloud_lidar: bool = False,
+                 runtime_point_cloud_lidar_width: int = 200,
+                 runtime_point_cloud_lidar_height: int = 64,
+                 runtime_point_cloud_lidar_fov: float = 90.0,
+                 save_runtime_lidar: bool = False):
         """
         Initialize batch evaluator.
 
@@ -98,6 +107,9 @@ class BatchEvaluator:
             alp_temperature: Temperature for Alpamayo generation
             alp_num_traj_samples: Number of trajectory samples for Alpamayo
             alp_max_generation_length: Max generation length for Alpamayo
+            enable_runtime_lidar: Enable MetaDrive runtime ray lidar
+            enable_runtime_point_cloud_lidar: Enable MetaDrive runtime PointCloudLidar
+            save_runtime_lidar: Save runtime lidar packets and debug visualizations
         """
         self.model_type = model_type
         self.config_path = config_path
@@ -139,6 +151,15 @@ class BatchEvaluator:
         self.num_groups = num_groups
         self.num_proposals = num_proposals
         self.v2_scorer_checkpoint = v2_scorer_checkpoint
+        self.enable_runtime_lidar = enable_runtime_lidar
+        self.runtime_lidar_num_lasers = runtime_lidar_num_lasers
+        self.runtime_lidar_distance = runtime_lidar_distance
+        self.runtime_lidar_height = runtime_lidar_height
+        self.enable_runtime_point_cloud_lidar = enable_runtime_point_cloud_lidar
+        self.runtime_point_cloud_lidar_width = runtime_point_cloud_lidar_width
+        self.runtime_point_cloud_lidar_height = runtime_point_cloud_lidar_height
+        self.runtime_point_cloud_lidar_fov = runtime_point_cloud_lidar_fov
+        self.save_runtime_lidar = save_runtime_lidar
 
         # Create output directories
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -179,6 +200,10 @@ class BatchEvaluator:
                 subdir += f"_np{self.num_proposals}"
         if self.enable_temporal_consistency:
             subdir += f"_ta{self.temporal_alpha}_th{self.temporal_max_history}"
+        if self.enable_runtime_lidar:
+            subdir += f"_runtime_lidar{self.runtime_lidar_num_lasers}"
+        if self.enable_runtime_point_cloud_lidar:
+            subdir += f"_runtime_pcl{self.runtime_point_cloud_lidar_width}x{self.runtime_point_cloud_lidar_height}"
         return subdir
 
     def evaluate_scenario(self, scenario_path: Path) -> Dict[str, Any]:
@@ -272,6 +297,20 @@ class BatchEvaluator:
             cmd.extend(["--num-proposals", str(self.num_proposals)])
         if self.v2_scorer_checkpoint:
             cmd.extend(["--v2-scorer-checkpoint", self.v2_scorer_checkpoint])
+
+        # Add runtime lidar flags
+        if self.enable_runtime_lidar:
+            cmd.append("--enable-runtime-lidar")
+            cmd.extend(["--runtime-lidar-num-lasers", str(self.runtime_lidar_num_lasers)])
+        cmd.extend(["--runtime-lidar-distance", str(self.runtime_lidar_distance)])
+        cmd.extend(["--runtime-lidar-height", str(self.runtime_lidar_height)])
+        if self.enable_runtime_point_cloud_lidar:
+            cmd.append("--enable-runtime-point-cloud-lidar")
+            cmd.extend(["--runtime-point-cloud-lidar-width", str(self.runtime_point_cloud_lidar_width)])
+            cmd.extend(["--runtime-point-cloud-lidar-height", str(self.runtime_point_cloud_lidar_height)])
+            cmd.extend(["--runtime-point-cloud-lidar-fov", str(self.runtime_point_cloud_lidar_fov)])
+        if self.save_runtime_lidar:
+            cmd.append("--save-runtime-lidar")
 
         # Add Alpamayo-specific flags
         if self.model_type == "alpamayo_r1":
@@ -592,7 +631,29 @@ def main():
                         help="Path to DiffusionDrive v2 checkpoint for loading coarse scorer weights. "
                              "Required when using --trajectory-scorer learned with DiffusionDrive v1.")
 
+    # Runtime lidar sensors
+    parser.add_argument('--enable-runtime-lidar', action='store_true',
+                        help='Enable MetaDrive runtime ray lidar and expose it in the unified lidar dict')
+    parser.add_argument('--runtime-lidar-num-lasers', type=int, default=720,
+                        help='Number of MetaDrive runtime ray lidar lasers (default: 720)')
+    parser.add_argument('--runtime-lidar-distance', type=float, default=50.0,
+                        help='Runtime lidar max range in meters for ray and point-cloud lidar (default: 50)')
+    parser.add_argument('--runtime-lidar-height', type=float, default=1.2,
+                        help='Runtime lidar sensor height in ego-frame meters (default: 1.2)')
+    parser.add_argument('--enable-runtime-point-cloud-lidar', action='store_true',
+                        help='Enable MetaDrive runtime PointCloudLidar and expose it in the unified lidar dict')
+    parser.add_argument('--runtime-point-cloud-lidar-width', type=int, default=200,
+                        help='Runtime PointCloudLidar depth image width (default: 200)')
+    parser.add_argument('--runtime-point-cloud-lidar-height', type=int, default=64,
+                        help='Runtime PointCloudLidar depth image height/channels (default: 64)')
+    parser.add_argument('--runtime-point-cloud-lidar-fov', type=float, default=90.0,
+                        help='Runtime PointCloudLidar FOV in degrees (default: 90)')
+    parser.add_argument('--save-runtime-lidar', action='store_true',
+                        help='Save per-frame runtime_lidar.npz files, PNG debug views, and runtime lidar GIFs')
+
     args = parser.parse_args()
+    if args.save_runtime_lidar and not (args.enable_runtime_lidar or args.enable_runtime_point_cloud_lidar):
+        parser.error('--save-runtime-lidar requires at least one runtime lidar sensor to be enabled')
 
     # Create batch evaluator
     evaluator = BatchEvaluator(
@@ -635,6 +696,15 @@ def main():
         num_groups=args.num_groups,
         num_proposals=args.num_proposals,
         v2_scorer_checkpoint=args.v2_scorer_checkpoint,
+        enable_runtime_lidar=args.enable_runtime_lidar,
+        runtime_lidar_num_lasers=args.runtime_lidar_num_lasers,
+        runtime_lidar_distance=args.runtime_lidar_distance,
+        runtime_lidar_height=args.runtime_lidar_height,
+        enable_runtime_point_cloud_lidar=args.enable_runtime_point_cloud_lidar,
+        runtime_point_cloud_lidar_width=args.runtime_point_cloud_lidar_width,
+        runtime_point_cloud_lidar_height=args.runtime_point_cloud_lidar_height,
+        runtime_point_cloud_lidar_fov=args.runtime_point_cloud_lidar_fov,
+        save_runtime_lidar=args.save_runtime_lidar,
     )
 
     # Run evaluation

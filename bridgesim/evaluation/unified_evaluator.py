@@ -562,11 +562,67 @@ def main():
              "Scoring metrics and route completion are computed only from this frame onwards."
     )
 
+    # Runtime lidar sensors
+    parser.add_argument(
+        "--enable-runtime-lidar",
+        action="store_true",
+        help="Enable MetaDrive runtime ray lidar and expose it in the unified lidar dict"
+    )
+    parser.add_argument(
+        "--runtime-lidar-num-lasers",
+        type=int,
+        default=720,
+        help="Number of MetaDrive runtime ray lidar lasers (default: 720)"
+    )
+    parser.add_argument(
+        "--runtime-lidar-distance",
+        type=float,
+        default=50.0,
+        help="Runtime lidar max range in meters for ray and point-cloud lidar (default: 50)"
+    )
+    parser.add_argument(
+        "--runtime-lidar-height",
+        type=float,
+        default=1.2,
+        help="Runtime lidar sensor height in ego-frame meters (default: 1.2)"
+    )
+    parser.add_argument(
+        "--enable-runtime-point-cloud-lidar",
+        action="store_true",
+        help="Enable MetaDrive runtime PointCloudLidar and expose it in the unified lidar dict"
+    )
+    parser.add_argument(
+        "--runtime-point-cloud-lidar-width",
+        type=int,
+        default=200,
+        help="Runtime PointCloudLidar depth image width (default: 200)"
+    )
+    parser.add_argument(
+        "--runtime-point-cloud-lidar-height",
+        type=int,
+        default=64,
+        help="Runtime PointCloudLidar depth image height/channels (default: 64)"
+    )
+    parser.add_argument(
+        "--runtime-point-cloud-lidar-fov",
+        type=float,
+        default=90.0,
+        help="Runtime PointCloudLidar FOV in degrees (default: 90)"
+    )
+    parser.add_argument(
+        "--save-runtime-lidar",
+        action="store_true",
+        help="Save per-frame runtime_lidar.npz files, PNG debug views, and runtime lidar GIFs"
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
     if args.model_type in ["uniad", "vad"] and not args.config:
         parser.error(f"--config is required for {args.model_type} model")
+
+    if args.save_runtime_lidar and not (args.enable_runtime_lidar or args.enable_runtime_point_cloud_lidar):
+        parser.error("--save-runtime-lidar requires at least one runtime lidar sensor to be enabled")
 
     # Initialize CUDA device
     if args.model_type in ["uniad", "vad"]:
@@ -615,6 +671,15 @@ def main():
         eval_frames=args.eval_frames,
         # scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
+        enable_runtime_lidar=args.enable_runtime_lidar,
+        runtime_lidar_num_lasers=args.runtime_lidar_num_lasers,
+        runtime_lidar_distance=args.runtime_lidar_distance,
+        runtime_lidar_height=args.runtime_lidar_height,
+        enable_runtime_point_cloud_lidar=args.enable_runtime_point_cloud_lidar,
+        runtime_point_cloud_lidar_width=args.runtime_point_cloud_lidar_width,
+        runtime_point_cloud_lidar_height=args.runtime_point_cloud_lidar_height,
+        runtime_point_cloud_lidar_fov=args.runtime_point_cloud_lidar_fov,
+        save_runtime_lidar=args.save_runtime_lidar,
     )
 
     # Run evaluation

@@ -28,6 +28,7 @@ BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end au
 - [√] Open-loop and closed-loop evaluation modes
 - [√] Configurable traffic modes: `no_traffic`, `log_replay`, `IDM`
 - [√] Support privileged agents: `PDM-Closed`
+- [√] Optional MetaDrive runtime LiDAR sensors for closed-loop evaluation
 - [ ] Adversarial traffic mode
 - [ ] Implementation of TTA module
 
@@ -135,6 +136,40 @@ python bridgesim/evaluation/unified_evaluator.py \
 | `--consensus-temperature` | `1.0` | Placeholder for scorer module |
 
 </details>
+
+### Optional Runtime LiDAR
+
+BridgeSim can attach MetaDrive runtime LiDAR sensors during closed-loop evaluation. This LiDAR is generated from the current simulated scene, not from source-dataset logs, so it stays aligned with the simulated ego pose and replay/IDM traffic.
+
+Two runtime sensors are available:
+
+| Sensor | CLI flag | Adapter input | Notes |
+|---|---|---|---|
+| `ray_lidar` | `--enable-runtime-lidar` | Ego-frame hit points and rasterized BEV | Used by DiffusionDrive, DiffusionDriveV2, and TransFuser when enabled |
+| `point_cloud_lidar` | `--enable-runtime-point-cloud-lidar` | Ego-frame unordered points plus dense point grid | Exposed for adapters that need 3D point-cloud input |
+
+Example:
+
+```bash
+python bridgesim/evaluation/unified_evaluator.py \
+    --model-type diffusiondrive \
+    --checkpoint ckpts/BridgeSim/navsimv2/diffusiondrive \
+    --plan-anchor-path ckpts/BridgeSim/navsimv2/kmeans_navsim_traj_20.npy \
+    --scenario-path /path/to/converted/scenario \
+    --output-dir outputs/ \
+    --traffic-mode log_replay \
+    --eval-mode closed_loop \
+    --enable-runtime-lidar \
+    --runtime-lidar-num-lasers 720 \
+    --runtime-lidar-distance 50 \
+    --enable-runtime-point-cloud-lidar \
+    --runtime-point-cloud-lidar-width 200 \
+    --runtime-point-cloud-lidar-height 64 \
+    --runtime-point-cloud-lidar-fov 90 \
+    --save-runtime-lidar
+```
+
+`--save-runtime-lidar` writes per-frame `runtime_lidar.npz` files and debug views, plus final `runtime_lidar_bev.gif` and `runtime_point_cloud_lidar_sensor_view.gif`.
 
 Or run batch evaluation over all converted scenarios, please use the following sequential batch evaluation with aggregated per-scenario metrics instead of <code>batch_evaluator.py</code> as we observe that this might be too heavy-weight for some systems. Refer to [scripts/sequential_batch_eval.sh](scripts/sequential_batch_eval.sh).
 

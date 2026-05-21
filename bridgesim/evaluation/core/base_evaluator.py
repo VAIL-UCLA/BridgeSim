@@ -28,6 +28,7 @@ from bridgesim.evaluation.utils.epdms_scorer_md import EPDMSScorer
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
 from bridgesim.evaluation.utils.constants import VOID, LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
+from bridgesim.evaluation.utils.lidar_utils import ray_lidar_to_ego_points
 
 
 @contextlib.contextmanager
@@ -91,6 +92,15 @@ class BaseEvaluator:
                  eval_frames: int = None,
                  # scorer_type: str = "legacy",
                  score_start_frame: int = None,
+                 enable_runtime_lidar: bool = False,
+                 runtime_lidar_num_lasers: int = 720,
+                 runtime_lidar_distance: float = 50.0,
+                 runtime_lidar_height: float = 1.2,
+                 enable_runtime_point_cloud_lidar: bool = False,
+                 runtime_point_cloud_lidar_width: int = 200,
+                 runtime_point_cloud_lidar_height: int = 64,
+                 runtime_point_cloud_lidar_fov: float = 90.0,
+                 save_runtime_lidar: bool = False,
                  ):
         """
         Initialize evaluator.
@@ -128,6 +138,15 @@ class BaseEvaluator:
         # self.scorer_type = scorer_type
         # Score start frame: defaults to ego_replay_frames if not specified
         self.score_start_frame = score_start_frame if score_start_frame is not None else self.ego_replay_frames
+        self.enable_runtime_lidar = enable_runtime_lidar
+        self.runtime_lidar_num_lasers = int(runtime_lidar_num_lasers)
+        self.runtime_lidar_distance = float(runtime_lidar_distance)
+        self.runtime_lidar_height = float(runtime_lidar_height)
+        self.enable_runtime_point_cloud_lidar = enable_runtime_point_cloud_lidar
+        self.runtime_point_cloud_lidar_width = int(runtime_point_cloud_lidar_width)
+        self.runtime_point_cloud_lidar_height = int(runtime_point_cloud_lidar_height)
+        self.runtime_point_cloud_lidar_fov = float(runtime_point_cloud_lidar_fov)
+        self.save_runtime_lidar = save_runtime_lidar
 
         assert replan_rate 
 
@@ -450,6 +469,215 @@ class BaseEvaluator:
                 raise
 
         return imgs
+
+
+    def save_runtime_lidar_visualization(self, frame_output_path, lidar_packet, output_name="runtime_lidar_bev.png"):
+        """Save a top-down debug image for one runtime lidar packet."""
+        points = lidar_packet.get('points_ego', np.zeros((0, 3), dtype=np.float32))
+        ray_fractions = lidar_packet.get('ray_fractions', np.zeros((0,), dtype=np.float32))
+        image_size = 700
+        margin = 40
+        center = image_size // 2
+        max_range = max(float(self.runtime_lidar_distance), 1.0)
+        scale = (center - margin) / max_range
+        canvas = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+
+        for radius_m in range(10, int(max_range) + 1, 10):
+            radius_px = int(radius_m * scale)
+            cv2.circle(canvas, (center, center), radius_px, (40, 40, 40), 1)
+            cv2.putText(canvas, f"{radius_m}m", (center + radius_px + 4, center - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 120), 1, cv2.LINE_AA)
+
+        cv2.line(canvas, (center, margin), (center, image_size - margin), (45, 45, 45), 1)
+        cv2.line(canvas, (margin, center), (image_size - margin, center), (45, 45, 45), 1)
+
+        if points.size > 0:
+            valid = np.isfinite(points).all(axis=1)
+            draw_points = points[valid]
+            px = np.round(center - draw_points[:, 1] * scale).astype(np.int32)
+            py = np.round(center - draw_points[:, 0] * scale).astype(np.int32)
+            in_bounds = (px >= 0) & (px < image_size) & (py >= 0) & (py < image_size)
+            canvas[py[in_bounds], px[in_bounds]] = (0, 255, 120)
+
+        cv2.circle(canvas, (center, center), 5, (255, 255, 255), -1)
+        cv2.arrowedLine(canvas, (center, center), (center, center - 45), (255, 255, 255), 2, tipLength=0.25)
+        cv2.putText(canvas, "+x forward", (center + 8, center - 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "+y left", (margin, center - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+
+        sensor_type = lidar_packet.get("sensor_type", "lidar")
+        ray_fractions = np.asarray(ray_fractions, dtype=np.float32).reshape(-1)
+        if ray_fractions.size > 0:
+            no_hit_count = int(np.sum(ray_fractions >= 0.999))
+            title = f"{sensor_type}: {len(points)} hits, {no_hit_count} max-range rays"
+        else:
+            title = f"{sensor_type}: {len(points)} points"
+        cv2.putText(canvas, title, (20, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imwrite(str(frame_output_path / output_name), canvas)
+
+    def save_runtime_point_cloud_sensor_view(self, frame_output_path, lidar_packet):
+        """Render the PointCloudLidar grid as a pure point-cloud sensor image."""
+        point_grid = lidar_packet.get('point_grid_ego')
+        if point_grid is None:
+            return
+
+        grid = np.asarray(point_grid, dtype=np.float32)
+        if grid.ndim != 3 or grid.shape[-1] != 3:
+            return
+
+        height, width = grid.shape[:2]
+        points = grid.reshape(-1, 3)
+        finite = np.isfinite(points).all(axis=1)
+        distance = np.linalg.norm(points[:, :3], axis=1)
+        max_range = max(float(lidar_packet.get('max_range', self.runtime_lidar_distance)), 1.0)
+        valid = finite & (distance > 0.1) & (distance < max_range * 0.98)
+        depth_norm = np.clip(distance / max_range, 0.0, 1.0)
+        # Visualize every valid point by range. Do not use a z-threshold split here;
+        # this view is meant to show whether ground context is present in PointCloudLidar.
+        color_values = ((1.0 - depth_norm) * 255.0).astype(np.uint8)
+        colors = cv2.applyColorMap(color_values.reshape(-1, 1), cv2.COLORMAP_TURBO).reshape(-1, 3)
+
+        canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        canvas.reshape(-1, 3)[valid] = colors[valid]
+        # MetaDrive PointCloudLidar grid rows are opposite normal image coordinates.
+        canvas = np.flipud(canvas)
+        canvas = cv2.resize(canvas, (960, 576), interpolation=cv2.INTER_NEAREST)
+
+        valid_count = int(np.sum(valid))
+        cv2.putText(canvas, f"PointCloudLidar sensor image: {valid_count} valid points", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (245, 245, 245), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "pure point cloud pixels: warm=near, cool=far; no z-threshold coloring", (16, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 210, 210), 1, cv2.LINE_AA)
+        cv2.imwrite(str(frame_output_path / "runtime_point_cloud_lidar_sensor_view.png"), canvas)
+
+    def _capture_runtime_ray_lidar(self, env, frame_id):
+        """Capture MetaDrive 2D physics ray lidar as one unified lidar packet."""
+        lidar_sensor = env.engine.get_sensor('lidar')
+        cloud_points, detected_objects = lidar_sensor.perceive(
+            env.agent,
+            physics_world=env.engine.physics_world.dynamic_world,
+            num_lasers=self.runtime_lidar_num_lasers,
+            distance=self.runtime_lidar_distance,
+            height=self.runtime_lidar_height,
+            show=False,
+        )
+        points = ray_lidar_to_ego_points(
+            cloud_points,
+            num_lasers=self.runtime_lidar_num_lasers,
+            distance=self.runtime_lidar_distance,
+            height=self.runtime_lidar_height,
+        )
+        return {
+            'sensor_name': 'ray_lidar',
+            'sensor_type': 'ray_lidar',
+            'frame': 'ego',
+            'timestamp': frame_id,
+            'points_ego': points,
+            'ray_fractions': np.asarray(cloud_points, dtype=np.float32),
+            'max_range': self.runtime_lidar_distance,
+            'num_lasers': self.runtime_lidar_num_lasers,
+            'height': self.runtime_lidar_height,
+            'num_detected_objects': len(detected_objects) if detected_objects is not None else 0,
+            'metadata': {
+                'source': 'metadrive.component.sensors.lidar.Lidar',
+                'coordinate_frame': 'ego',
+                'description': 'Horizontal MetaDrive physics ray lidar at a fixed sensor height.',
+            },
+        }
+
+    def _capture_runtime_point_cloud_lidar(self, env, frame_id):
+        """Capture MetaDrive depth-rendered point cloud lidar as one unified lidar packet."""
+        sensor = env.engine.get_sensor('point_cloud_lidar')
+        sensor.lens.setFov(self.runtime_point_cloud_lidar_fov)
+        sensor.lens.setFar(self.runtime_lidar_distance)
+        point_grid = sensor.perceive(
+            to_float=True,
+            new_parent_node=env.agent.origin,
+            position=(0.0, 0.0, self.runtime_lidar_height),
+            hpr=(0.0, 0.0, 0.0),
+        )
+        point_grid_sensor = np.asarray(point_grid, dtype=np.float32)
+        point_grid = np.empty_like(point_grid_sensor)
+        point_grid[..., 0] = point_grid_sensor[..., 1]
+        point_grid[..., 1] = -point_grid_sensor[..., 0]
+        point_grid[..., 2] = point_grid_sensor[..., 2] + self.runtime_lidar_height
+
+        points = point_grid.reshape(-1, 3)
+        finite = np.isfinite(points).all(axis=1)
+        points = points[finite]
+        max_range = float(self.runtime_lidar_distance)
+        in_range = np.linalg.norm(points[:, :3], axis=1) <= max_range
+        points = points[in_range]
+        return {
+            'sensor_name': 'point_cloud_lidar',
+            'sensor_type': 'point_cloud_lidar',
+            'frame': 'ego',
+            'timestamp': frame_id,
+            'points_ego': points.astype(np.float32, copy=False),
+            'point_grid_ego': point_grid,
+            'width': self.runtime_point_cloud_lidar_width,
+            'height': self.runtime_point_cloud_lidar_height,
+            'fov': self.runtime_point_cloud_lidar_fov,
+            'max_range': max_range,
+            'metadata': {
+                'source': 'metadrive.component.sensors.point_cloud_lidar.PointCloudLidar',
+                'coordinate_frame': 'ego',
+                'description': 'Depth-camera-derived xyz point grid from MetaDrive PointCloudLidar.',
+            },
+        }
+
+    def perceive_runtime_lidar(self, env, frame_id):
+        """Capture enabled MetaDrive runtime lidar sensors into one unified container."""
+        if not self.enable_runtime_lidar and not self.enable_runtime_point_cloud_lidar:
+            return None
+
+        lidars = {}
+        if self.enable_runtime_lidar:
+            lidars['ray_lidar'] = self._capture_runtime_ray_lidar(env, frame_id)
+        if self.enable_runtime_point_cloud_lidar:
+            lidars['point_cloud_lidar'] = self._capture_runtime_point_cloud_lidar(env, frame_id)
+
+        default_lidar = 'ray_lidar' if 'ray_lidar' in lidars else next(iter(lidars))
+        lidar_data = {
+            'timestamp': frame_id,
+            'frame': 'ego',
+            'default_lidar': default_lidar,
+            'lidars': lidars,
+        }
+
+        if self.save_runtime_lidar:
+            frame_output_path = self.output_dir / f"{frame_id:05d}"
+            frame_output_path.mkdir(parents=True, exist_ok=True)
+            save_payload = {
+                'timestamp': np.asarray([frame_id], dtype=np.int32),
+                'frame': np.asarray([lidar_data['frame']]),
+                'default_lidar': np.asarray([lidar_data['default_lidar']]),
+            }
+            if 'ray_lidar' in lidars:
+                ray_lidar_packet = lidars['ray_lidar']
+                save_payload.update({
+                    'ray_lidar_sensor_type': np.asarray([ray_lidar_packet['sensor_type']]),
+                    'ray_lidar_frame': np.asarray([ray_lidar_packet['frame']]),
+                    'ray_lidar_points_ego': ray_lidar_packet['points_ego'],
+                    'ray_lidar_ray_fractions': ray_lidar_packet['ray_fractions'],
+                    'ray_lidar_max_range': np.asarray([ray_lidar_packet['max_range']], dtype=np.float32),
+                    'ray_lidar_num_lasers': np.asarray([ray_lidar_packet['num_lasers']], dtype=np.int32),
+                    'ray_lidar_height': np.asarray([ray_lidar_packet['height']], dtype=np.float32),
+                    'ray_lidar_num_detected_objects': np.asarray([ray_lidar_packet['num_detected_objects']], dtype=np.int32),
+                })
+                self.save_runtime_lidar_visualization(frame_output_path, ray_lidar_packet)
+            if 'point_cloud_lidar' in lidars:
+                point_cloud_packet = lidars['point_cloud_lidar']
+                save_payload.update({
+                    'point_cloud_lidar_sensor_type': np.asarray([point_cloud_packet['sensor_type']]),
+                    'point_cloud_lidar_frame': np.asarray([point_cloud_packet['frame']]),
+                    'point_cloud_lidar_points_ego': point_cloud_packet['points_ego'],
+                    'point_cloud_lidar_point_grid_ego': point_cloud_packet['point_grid_ego'],
+                    'point_cloud_lidar_width': np.asarray([point_cloud_packet['width']], dtype=np.int32),
+                    'point_cloud_lidar_height': np.asarray([point_cloud_packet['height']], dtype=np.int32),
+                    'point_cloud_lidar_fov': np.asarray([point_cloud_packet['fov']], dtype=np.float32),
+                    'point_cloud_lidar_max_range': np.asarray([point_cloud_packet['max_range']], dtype=np.float32),
+                })
+                self.save_runtime_point_cloud_sensor_view(frame_output_path, point_cloud_packet)
+            np.savez_compressed(frame_output_path / "runtime_lidar.npz", **save_payload)
+
+        return lidar_data
 
     def compute_ego_state(self, env, frame_id, prev_velocity, prev_heading):
         """Compute ego vehicle state in world coordinates."""
@@ -1523,7 +1751,11 @@ class BaseEvaluator:
         # 1. Perceive
         imgs = self.perceive(env, frame_id)
 
-        # 2. Compute ego state
+        # 2. Capture runtime lidar from the current simulated ego pose
+        runtime_lidar_data = self.perceive_runtime_lidar(env, frame_id)
+        self.model_adapter.set_runtime_lidar(runtime_lidar_data)
+
+        # 3. Compute ego state
         ego_state = self.compute_ego_state(env, frame_id, prev_velocity, prev_heading)
 
         # 3. Get navigation waypoint
@@ -1873,7 +2105,13 @@ class BaseEvaluator:
             traffic_mode=self.traffic_mode,
             render=self.enable_vis,
             image_on_cuda=False,
-            agent_policy=agent_policy
+            agent_policy=agent_policy,
+            enable_runtime_lidar=self.enable_runtime_lidar,
+            runtime_lidar_num_lasers=self.runtime_lidar_num_lasers,
+            runtime_lidar_distance=self.runtime_lidar_distance,
+            enable_runtime_point_cloud_lidar=self.enable_runtime_point_cloud_lidar,
+            runtime_point_cloud_lidar_width=self.runtime_point_cloud_lidar_width,
+            runtime_point_cloud_lidar_height=self.runtime_point_cloud_lidar_height,
         )
 
         # Initialize controller based on type, allowing adapters to override
@@ -2128,6 +2366,11 @@ class BaseEvaluator:
                         print("\n[WARNING] No valid EPDMS frames found for closed-loop scoring.")
 
                     self._save_driving_score_summary(df, mean_epdms, route_completion, final_score)
+
+            # Generate runtime lidar GIFs whenever lidar frames were saved.
+            if self.save_runtime_lidar:
+                self.generate_gif(frame_ids, "runtime_lidar_bev.gif", "runtime_lidar_bev.png")
+                self.generate_gif(frame_ids, "runtime_point_cloud_lidar_sensor_view.gif", "runtime_point_cloud_lidar_sensor_view.png")
 
             # Generate GIFs and MP4s from visualizations
             if self.enable_vis:

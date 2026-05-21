@@ -17,6 +17,7 @@ from bridgesim.modelzoo.navsim.agents.diffusiondrivev2.diffusiondrivev2_sel_conf
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
+from bridgesim.evaluation.utils.lidar_utils import make_lidar_bev
 from bridgesim.utils.camera_utils import NAVSIM_CAM_CONFIGS
 
 
@@ -188,14 +189,8 @@ class DiffusionDriveV2Adapter(BaseModelAdapter):
         return tensor_image
 
     def _create_lidar_bev(self) -> torch.Tensor:
-        """Create dummy LiDAR BEV representation."""
-        lidar_bev = torch.zeros(
-            self.config.lidar_seq_len,
-            self.config.lidar_resolution_height,
-            self.config.lidar_resolution_width,
-            dtype=torch.float32
-        )
-        return lidar_bev
+        """Create LiDAR BEV from runtime ray lidar when available."""
+        return make_lidar_bev(self.get_runtime_lidar(), self.config, sensor_name="ray_lidar")
 
     def _get_status_feature(self, ego_state: Dict[str, Any], command: int) -> torch.Tensor:
         """
