@@ -32,6 +32,16 @@ class BaseModelAdapter(ABC):
         self.config_path = config_path
         self.model = None
         self.device = "cuda"
+        self.runtime_lidar_data = None
+
+
+    def set_runtime_lidar(self, lidar_data):
+        """Set the current unified runtime lidar container for adapter preprocessing."""
+        self.runtime_lidar_data = lidar_data
+
+    def get_runtime_lidar(self):
+        """Return the current unified runtime lidar container, or None if unavailable."""
+        return self.runtime_lidar_data
 
     @abstractmethod
     def load_model(self):

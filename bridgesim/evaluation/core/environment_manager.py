@@ -5,6 +5,8 @@ Handles traffic mode configuration and environment setup.
 
 from pathlib import Path
 from metadrive.component.sensors.rgb_camera import RGBCamera
+from metadrive.component.sensors.lidar import Lidar
+from metadrive.component.sensors.point_cloud_lidar import PointCloudLidar
 from metadrive.policy.env_input_policy import EnvInputPolicy
 from metadrive.envs.scenario_env import ScenarioEnv
 
@@ -28,12 +30,23 @@ class EnvironmentManager:
         agent_policy: Policy class for the ego agent (default: EnvInputPolicy)
     """
 
-    def __init__(self, scenario_path, traffic_mode="log_replay", render=False, image_on_cuda=True, agent_policy=EnvInputPolicy):
+    def __init__(self, scenario_path, traffic_mode="log_replay", render=False, image_on_cuda=True,
+                 agent_policy=EnvInputPolicy, enable_runtime_lidar=False,
+                 runtime_lidar_num_lasers=720, runtime_lidar_distance=50.0,
+                 enable_runtime_point_cloud_lidar=False,
+                 runtime_point_cloud_lidar_width=200,
+                 runtime_point_cloud_lidar_height=64):
         self.scenario_path = Path(scenario_path)
         self.traffic_mode = traffic_mode
         self.render = render
         self.image_on_cuda = image_on_cuda
         self.agent_policy = agent_policy
+        self.enable_runtime_lidar = enable_runtime_lidar
+        self.runtime_lidar_num_lasers = int(runtime_lidar_num_lasers)
+        self.runtime_lidar_distance = float(runtime_lidar_distance)
+        self.enable_runtime_point_cloud_lidar = enable_runtime_point_cloud_lidar
+        self.runtime_point_cloud_lidar_width = int(runtime_point_cloud_lidar_width)
+        self.runtime_point_cloud_lidar_height = int(runtime_point_cloud_lidar_height)
         self.env = None
 
     def create_env(self):
@@ -68,6 +81,24 @@ class EnvironmentManager:
             "show_fps": False,
             "window_size": (800, 600),
         }
+
+
+        if self.enable_runtime_lidar:
+            config["sensors"]["lidar"] = (Lidar,)
+            config["vehicle_config"]["lidar"] = {
+                "num_lasers": self.runtime_lidar_num_lasers,
+                "distance": self.runtime_lidar_distance,
+                "gaussian_noise": 0.0,
+                "dropout_prob": 0.0,
+            }
+
+        if self.enable_runtime_point_cloud_lidar:
+            config["sensors"]["point_cloud_lidar"] = (
+                PointCloudLidar,
+                self.runtime_point_cloud_lidar_width,
+                self.runtime_point_cloud_lidar_height,
+                True,
+            )
 
         self.env = ScenarioEnv(config)
         return self.env
