@@ -213,9 +213,6 @@ def extract_tracks(tracks, sdc_idx, track_length):
             obj_state["state"]["heading"][step_count] = state.heading
 
             velocity_xy = np.array([state.velocity_x, state.velocity_y], dtype=np.float32)
-            if object_id == sdc_id:
-                # Evaluator replay expects ego velocity in local frame.
-                velocity_xy = global_velocity_to_local(velocity_xy, state.heading)
             obj_state["state"]["velocity"][step_count] = velocity_xy
 
             obj_state["state"]["valid"][step_count] = state.valid
