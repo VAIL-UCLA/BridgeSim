@@ -32,6 +32,7 @@ sys.path.insert(0, str(converters_bench2drive_path))
 from renderer import camera_params, convert_camera_params_to_simple_format, ScenarioRenderer
 
 from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
+from bridgesim.utils.camera_utils import CAMERA_COORDINATE_METADRIVE, CAMERA_COORDINATE_SYSTEM_KEY
 from bridgesim.evaluation.utils.constants import NAVSIM_CMD_MAPPING, DEFAULT_CMD
 
 
@@ -166,6 +167,8 @@ class RAPAdapter(BaseModelAdapter):
                 image_height=1120,
                 to_metadrive=True
             )
+            for cam_config in cam_configs.values():
+                cam_config[CAMERA_COORDINATE_SYSTEM_KEY] = CAMERA_COORDINATE_METADRIVE
             return cam_configs
         else:
             # rasterized and rasterized_3d modes handle perception themselves

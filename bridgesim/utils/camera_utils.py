@@ -13,6 +13,11 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+CAMERA_COORDINATE_SYSTEM_KEY = "coordinate_system"
+CAMERA_COORDINATE_CARLA = "carla"
+CAMERA_COORDINATE_NAVSIM = "navsim"
+CAMERA_COORDINATE_METADRIVE = "metadrive"
+
 # =============================================================================
 # Bench2Drive 6-Camera Setup
 # =============================================================================
@@ -240,6 +245,7 @@ def convert_camera_params_to_simple_format(
                 "fov_v": float(fov_v),
                 "width": image_width,
                 "height": image_height,
+                CAMERA_COORDINATE_SYSTEM_KEY: CAMERA_COORDINATE_METADRIVE,
             }
         else:
             # Keep original RAP/nuScenes coordinates
@@ -255,9 +261,37 @@ def convert_camera_params_to_simple_format(
                 "fov_v": float(fov_v),
                 "width": image_width,
                 "height": image_height,
+                CAMERA_COORDINATE_SYSTEM_KEY: CAMERA_COORDINATE_NAVSIM,
             }
 
     return simple_format
+
+def metadrive_pose_from_camera_config(cam_config: Dict[str, float]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """
+    Convert a BridgeSim camera config into the pose expected by MetaDrive's
+    BaseCamera.perceive(position=..., hpr=...).
+
+    Supported config frames:
+      - carla/default: x=forward, y=right, yaw positive to the right.
+      - navsim: x=forward, y=left, yaw positive to the left.
+      - metadrive: x=right, y=forward, heading positive to the left.
+    """
+    coord = cam_config.get(CAMERA_COORDINATE_SYSTEM_KEY, CAMERA_COORDINATE_CARLA)
+    x = cam_config["x"]
+    y = cam_config["y"]
+    z = cam_config["z"]
+    yaw = cam_config["yaw"]
+    pitch = cam_config["pitch"]
+    roll = cam_config["roll"]
+
+    if coord == CAMERA_COORDINATE_CARLA:
+        return (y, x, z), (-yaw, pitch, -roll)
+    if coord == CAMERA_COORDINATE_NAVSIM:
+        return (-y, x, z), (yaw, pitch, roll)
+    if coord == CAMERA_COORDINATE_METADRIVE:
+        return (x, y, z), (yaw, pitch, roll)
+
+    raise ValueError(f"Unknown camera coordinate system: {coord}")
 
 def calculate_fov_from_intrinsics(
     K: np.ndarray, image_width: int, image_height: int
@@ -366,6 +400,10 @@ NAVSIM_CAM_CONFIGS = {
     'CAM_B0': {'x': -0.47463312, 'y':  0.02368552, 'z': 1.43418380, 'yaw': 179.54013694, 'pitch':  0.71122677, 'roll': 0.0, 'fov': 70.0, 'fov_h': 63.71026476, 'fov_v': 39.84706408, 'width': 1920, 'height': 1120},
     'CAM_THIRD_PERSON': {'x': -9.0, 'y': 0.0, 'z': 6.0, 'yaw': 0.0, 'pitch': -20.0, 'roll': 0.0, 'fov': 50, 'width': 900, 'height': 900},
 }
+
+for _cam_name, _cam_config in NAVSIM_CAM_CONFIGS.items():
+    if _cam_name != 'CAM_THIRD_PERSON':
+        _cam_config[CAMERA_COORDINATE_SYSTEM_KEY] = CAMERA_COORDINATE_NAVSIM
 
 
 # =============================================================================

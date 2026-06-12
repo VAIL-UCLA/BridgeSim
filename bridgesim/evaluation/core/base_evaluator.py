@@ -29,6 +29,7 @@ from bridgesim.evaluation.models.base_adapter import BaseModelAdapter
 from bridgesim.evaluation.core.environment_manager import EnvironmentManager
 from bridgesim.evaluation.utils.constants import VOID, LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
 from bridgesim.evaluation.utils.lidar_utils import ray_lidar_to_ego_points
+from bridgesim.utils.camera_utils import metadrive_pose_from_camera_config
 
 
 @contextlib.contextmanager
@@ -446,11 +447,12 @@ class BaseEvaluator:
             sensor.lens.setFov(cam_config['fov'])
 
             try:
+                position, hpr = metadrive_pose_from_camera_config(cam_config)
                 sensor_output = sensor.perceive(
                     to_float=False,
                     new_parent_node=env.agent.origin,
-                    position=(cam_config['y'], cam_config['x'], cam_config['z']),
-                    hpr=(-cam_config['yaw'], cam_config['pitch'], -cam_config['roll'])
+                    position=position,
+                    hpr=hpr
                 )
 
                 # Handle both CUDA tensors (with .get()) and numpy arrays
