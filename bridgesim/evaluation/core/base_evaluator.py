@@ -437,6 +437,9 @@ class BaseEvaluator:
         imgs = {}
         sensor = env.engine.get_sensor('rgb_camera')
         camera_configs = self.model_adapter.get_camera_configs()
+        image_color_format = self.model_adapter.get_image_color_format().lower()
+        if image_color_format not in {"bgr", "rgb"}:
+            raise ValueError(f"Unsupported image color format: {image_color_format}")
 
         # Save images if visualization is enabled
         frame_output_path = self.output_dir / f"{frame_id:05d}"
@@ -461,10 +464,16 @@ class BaseEvaluator:
                 else:
                     sensor_data = sensor_output
 
+                if image_color_format == "rgb" and sensor_data.ndim == 3 and sensor_data.shape[2] == 3:
+                    sensor_data = sensor_data[:, :, ::-1].copy()
+
                 imgs[name] = sensor_data
 
                 if self.enable_vis:
-                    cv2.imwrite(str(frame_output_path / f"{name.lower()}.jpg"), sensor_data)
+                    image_to_save = sensor_data
+                    if image_color_format == "rgb" and sensor_data.ndim == 3 and sensor_data.shape[2] == 3:
+                        image_to_save = sensor_data[:, :, ::-1]
+                    cv2.imwrite(str(frame_output_path / f"{name.lower()}.jpg"), image_to_save)
 
             except Exception as e:
                 print(f"Error capturing {name}: {e}")

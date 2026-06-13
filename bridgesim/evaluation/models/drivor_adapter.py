@@ -260,6 +260,9 @@ class DrivoRAdapter(BaseModelAdapter):
             # 8 camera configuration
             return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_L1', 'CAM_L2', 'CAM_R0', 'CAM_R1', 'CAM_R2', 'CAM_B0')}
 
+    def get_image_color_format(self) -> str:
+        return "rgb"
+
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
         Preprocess images for DrivoR model.

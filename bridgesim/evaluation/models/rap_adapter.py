@@ -174,6 +174,9 @@ class RAPAdapter(BaseModelAdapter):
             # rasterized and rasterized_3d modes handle perception themselves
             return {}
 
+    def get_image_color_format(self) -> str:
+        return "rgb"
+
     def perceive(self, env, frame_id: int):
         """
         Custom perception for rasterized_3d mode: builds a scenario dict from

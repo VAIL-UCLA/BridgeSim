@@ -74,6 +74,9 @@ class LTFAdapter(BaseModelAdapter):
         """LTF uses 3 cameras (left, front, right) stitched together."""
         return {k: NAVSIM_CAM_CONFIGS[k] for k in ('CAM_F0', 'CAM_L0', 'CAM_R0')}
 
+    def get_image_color_format(self) -> str:
+        return "rgb"
+
     def _preprocess_images(self, images_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
         Preprocess images for LTF model.

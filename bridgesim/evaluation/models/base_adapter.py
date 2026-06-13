@@ -61,7 +61,8 @@ class BaseModelAdapter(ABC):
         Prepare model input from raw sensor data and ego state.
 
         Args:
-            images: Dictionary mapping camera names to RGB images (H, W, 3)
+            images: Dictionary mapping camera names to images (H, W, 3) in
+                the format requested by get_image_color_format().
             ego_state: Dictionary containing:
                 - 'position': (x, y, z) ego position in world frame
                 - 'heading': ego heading in radians
@@ -137,6 +138,13 @@ class BaseModelAdapter(ABC):
         or return None to let the base evaluator handle perception normally.
         """
         return None
+
+    def get_image_color_format(self) -> str:
+        """
+        Return the channel order expected by prepare_input() for images captured
+        by the base evaluator. MetaDrive camera output is BGR by default.
+        """
+        return "bgr"
 
     def get_camera_configs(self) -> Dict[str, Dict[str, float]]:
         """
