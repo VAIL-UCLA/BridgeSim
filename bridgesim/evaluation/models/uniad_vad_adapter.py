@@ -145,6 +145,11 @@ class UniADVADAdapter(BaseModelAdapter):
 
         print(f"{self.model_type.upper()} model loaded successfully.")
 
+    def get_image_color_format(self) -> str:
+        # mmcv loaders provide BGR images; NormalizeMultiviewImage handles
+        # any config-level BGR->RGB conversion via img_norm_cfg.to_rgb.
+        return "bgr"
+
     def prepare_input(self,
                      images: Dict[str, np.ndarray],
                      ego_state: Dict[str, Any],
