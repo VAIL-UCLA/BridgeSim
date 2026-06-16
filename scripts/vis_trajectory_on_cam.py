@@ -60,13 +60,30 @@ def _build_extrinsics(cam_cfg: dict) -> Tuple[np.ndarray, np.ndarray]:
     return R_veh_to_cam, cam_pos
 
 
-def _build_intrinsics(cam_cfg: dict) -> Tuple[float, float, float, float]:
-    W = float(cam_cfg["width"])
-    H = float(cam_cfg["height"])
-    fov_h_rad = math.radians(cam_cfg.get("fov_h", cam_cfg.get("fov", 63.71)))
-    fx = (W / 2.0) / math.tan(fov_h_rad / 2.0)
-    fov_v = cam_cfg.get("fov_v", None)
-    fy = (H / 2.0) / math.tan(math.radians(fov_v) / 2.0) if fov_v else fx
+def _build_intrinsics(
+    cam_cfg: dict,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+) -> Tuple[float, float, float, float]:
+    """Return intrinsics matching the rendered image, not the model calibration size."""
+    W = float(image_width if image_width is not None else cam_cfg["width"])
+    H = float(image_height if image_height is not None else cam_cfg["height"])
+
+    # BaseEvaluator renders MetaDrive camera frames with sensor.lens.setFov(cam_cfg["fov"]).
+    # NAVSIM fov_h/fov_v and width/height describe model calibration, but cam_f0.jpg is
+    # the live MetaDrive sensor buffer (currently 900x900), so using those values shifts
+    # overlays in the generated GIF/MP4.
+    if "render_fov_h" in cam_cfg or "render_fov_v" in cam_cfg:
+        fov_h = cam_cfg.get("render_fov_h", cam_cfg.get("fov", cam_cfg.get("fov_h", 63.71)))
+        fov_v = cam_cfg.get("render_fov_v", fov_h)
+    elif "fov" in cam_cfg:
+        fov_h = fov_v = cam_cfg["fov"]
+    else:
+        fov_h = cam_cfg.get("fov_h", 63.71)
+        fov_v = cam_cfg.get("fov_v", fov_h)
+
+    fx = (W / 2.0) / math.tan(math.radians(fov_h) / 2.0)
+    fy = (H / 2.0) / math.tan(math.radians(fov_v) / 2.0)
     return fx, fy, W / 2.0, H / 2.0
 
 
@@ -198,7 +215,7 @@ def draw_trajectory_ribbon(
     H = img.shape[0]
 
     R, cam_pos = _build_extrinsics(cam_cfg)
-    fx, fy, cx, cy = _build_intrinsics(cam_cfg)
+    fx, fy, cx, cy = _build_intrinsics(cam_cfg, W, H)
 
     plan_traj_ego = np.asarray(plan_traj_ego, dtype=float)
     if plan_traj_ego.ndim == 2 and plan_traj_ego.shape[0] >= 2:
