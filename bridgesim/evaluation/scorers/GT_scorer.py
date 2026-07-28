@@ -53,6 +53,23 @@ VEHICLE_POLYGON_COORDS = np.array([
 
 W_PROGRESS, W_TTC, W_LANE_KEEPING, W_HISTORY_COMFORT, W_EXTENDED_COMFORT = 5.0, 5.0, 2.0, 2.0, 2.0
 W_TOTAL = W_PROGRESS + W_TTC + W_LANE_KEEPING + W_HISTORY_COMFORT + W_EXTENDED_COMFORT
+
+# Ego-progress normalisation (NAVSIM, arXiv:2406.15349). Progress is a RATIO to
+# an achievable upper bound, never an absolute distance. This scorer RANKS a
+# candidate set, so it mirrors NAVSIM's proposal-scoring path
+# (``pdm_scorer.py::_aggregate_pdm_scores``) rather than its agent-evaluation
+# path: the bound is the best progress achieved by any non-disqualified
+# candidate in the batch.
+#
+#   masked = progress_raw * (multiplicative_prod > 0)
+#   ep     = clip(progress_raw / max(masked), 0, 1)   if max(masked) > threshold
+#   ep     = 1.0                                       otherwise
+#   ep     = 0.0                                       where prod == 0
+#
+# Below the threshold every candidate is effectively stationary, progress
+# cannot discriminate between them, and forcing it to 1.0 keeps the term
+# neutral instead of penalising physics no candidate can beat.
+PROGRESS_DISTANCE_THRESHOLD_M = 5.0
 LANE_DEVIATION_LIMIT = 0.5
 LANE_KEEPING_WINDOW = 2.0
 TTC_HORIZON = 1.0
@@ -333,7 +350,7 @@ class GTScorer(BaseTrajectoryScorer):
                            red_lanes_per_t: list = None) -> dict:
         metrics = {
             "nc": 1.0, "dac": 1.0, "ddc": 1.0, "tlc": 1.0,
-            "ep": 0.0, "ttc": 1.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
+            "ep": 0.0, "ep_raw_m": 0.0, "ttc": 1.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
         }
 
         # --- Pre-build caches for this candidate ---
@@ -479,12 +496,33 @@ class GTScorer(BaseTrajectoryScorer):
             comfortable = (diff_acc <= EC_ACCEL_THRESH) & (diff_yr <= EC_YAW_RATE_THRESH)
             metrics['ec'] = float(comfortable.sum()) / len(comfortable) if len(comfortable) > 0 else 1.0
 
-        # 8. Progress
+        # 8. Progress, as RAW METRES. Normalisation is batch-relative and so
+        # can only happen once every candidate has been scored; see
+        # ``_normalize_batch_progress``.
         dist = math.sqrt((states['x'][-1] - states['x'][0]) ** 2 +
                          (states['y'][-1] - states['y'][0]) ** 2)
-        metrics['ep'] = min(dist / 30.0, 1.0)
+        metrics['ep_raw_m'] = float(dist)
 
         return metrics
+
+    @staticmethod
+    def _normalize_batch_progress(raw_progress: np.ndarray,
+                                  multi_prods: np.ndarray) -> np.ndarray:
+        """NAVSIM ego progress for a candidate set, normalised batch-relative.
+
+        :param raw_progress: (N,) raw progress per candidate, in metres
+        :param multi_prods: (N,) product of the binary multiplicative metrics;
+            0.0 marks a disqualified candidate
+        :return: (N,) normalised ego progress in [0, 1]
+        """
+        masked = raw_progress * (multi_prods > 0.0)
+        norm_constant = float(masked.max()) if masked.size else 0.0
+        if norm_constant > PROGRESS_DISTANCE_THRESHOLD_M:
+            normalized = np.clip(raw_progress / norm_constant, 0.0, 1.0)
+        else:
+            normalized = np.ones(len(raw_progress), dtype=np.float64)
+        normalized[multi_prods == 0.0] = 0.0
+        return normalized
 
     # ---------------------------------------------------------------
     # Coordinate transforms
@@ -553,7 +591,12 @@ class GTScorer(BaseTrajectoryScorer):
         all_states = self._get_all_trajectory_states(all_paths_sim, self.planner_dt)
 
         # --- Step 5: Score each candidate ---
+        # Two passes: ego progress is normalised against the best candidate in
+        # the batch, so no candidate's score is final until all are measured.
         scores = np.zeros(N)
+        all_metrics = [None] * N
+        raw_progress = np.zeros(N)
+        multi_prods = np.zeros(N)
         for i in range(N):
             # Extract per-candidate states (views, no copy)
             states_i = {
@@ -572,11 +615,19 @@ class GTScorer(BaseTrajectoryScorer):
                 agents_per_t=agents_per_t, red_lanes_per_t=red_lanes_per_t,
             )
 
-            multi_prod = metrics['nc'] * metrics['dac'] * metrics['ddc'] * metrics['tlc']
+            all_metrics[i] = metrics
+            raw_progress[i] = metrics['ep_raw_m']
+            multi_prods[i] = metrics['nc'] * metrics['dac'] * metrics['ddc'] * metrics['tlc']
+
+        # Batch-relative ego progress, then the weighted sum per candidate.
+        ep_normalized = self._normalize_batch_progress(raw_progress, multi_prods)
+        for i in range(N):
+            metrics = all_metrics[i]
+            metrics['ep'] = float(ep_normalized[i])
             weighted_sum = (W_PROGRESS * metrics['ep'] + W_TTC * metrics['ttc'] +
                             W_LANE_KEEPING * metrics['lk'] + W_HISTORY_COMFORT * metrics['hc'] +
                             W_EXTENDED_COMFORT * metrics['ec'])
-            scores[i] = multi_prod * weighted_sum / W_TOTAL
+            scores[i] = multi_prods[i] * weighted_sum / W_TOTAL
 
         best_idx = int(np.argmax(scores))
         self.prev_frame_idx = frame_idx
