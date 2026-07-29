@@ -58,6 +58,19 @@ W_HISTORY_COMFORT = 2.0
 W_EXTENDED_COMFORT = 2.0
 W_TOTAL = W_PROGRESS + W_LANE_KEEPING + W_HISTORY_COMFORT + W_EXTENDED_COMFORT
 
+# Ego-progress normalisation (NAVSIM, arXiv:2406.15349): progress is a RATIO to
+# an achievable upper bound, not an absolute distance.
+#
+# This scorer compares trajectories ACROSS scoring calls -- the retained
+# previous trajectory is scored separately from the new candidate batch, then
+# the two scores are compared to decide whether to replan. A per-call
+# denominator would make those scores incomparable (each trajectory would be
+# normalised against a different bound), so the batch denominator is computed
+# once per decision and threaded explicitly into every score that participates
+# in that comparison. Callers must pass the SAME ``progress_norm_m`` to every
+# score they intend to compare.
+PROGRESS_DISTANCE_THRESHOLD_M = 5.0
+
 LANE_DEVIATION_LIMIT = 0.5
 LANE_KEEPING_WINDOW = 2.0
 STOPPED_SPEED_THRESHOLD = 5e-2
@@ -380,7 +393,7 @@ class TTAScorer(BaseTrajectoryScorer):
                            red_lanes_per_t: list = None) -> dict:
         metrics = {
             "col": 1.0, "dac": 1.0, "ddc": 1.0, "tlc": 1.0,
-            "ep": 0.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
+            "ep": 0.0, "ep_raw_m": 0.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
         }
 
         ego_polys = [self._get_ego_polygon(states['x'][t], states['y'][t], states['heading'][t])
@@ -554,10 +567,12 @@ class TTAScorer(BaseTrajectoryScorer):
             comfortable = (diff_acc <= EC_ACCEL_THRESH) & (diff_yr <= EC_YAW_RATE_THRESH)
             metrics['ec'] = float(comfortable.sum()) / len(comfortable) if len(comfortable) > 0 else 1.0
 
-        # 8. Progress
+        # 8. Progress, as RAW METRES. Normalisation needs a denominator shared
+        # across every trajectory being compared, so it happens in
+        # ``_metrics_to_score``.
         dist = math.sqrt((states['x'][-1] - states['x'][0]) ** 2 +
                          (states['y'][-1] - states['y'][0]) ** 2)
-        metrics['ep'] = min(dist / 3.0, 1.0)
+        metrics['ep_raw_m'] = float(dist)
 
         return metrics
 
@@ -566,9 +581,36 @@ class TTAScorer(BaseTrajectoryScorer):
     # ---------------------------------------------------------------
 
     @staticmethod
-    def _metrics_to_score(metrics: dict) -> float:
-        """Convert metrics dict to scalar score."""
+    def _normalize_progress(raw_m: float, multi_prod: float,
+                            norm_m: float) -> float:
+        """NAVSIM ego progress for one trajectory against a shared bound.
+
+        :param raw_m: this trajectory's raw progress in metres
+        :param multi_prod: product of the binary multiplicative metrics;
+            0.0 disqualifies the trajectory
+        :param norm_m: the shared denominator in metres (see
+            :data:`PROGRESS_DISTANCE_THRESHOLD_M`)
+        :return: normalised ego progress in [0, 1]
+        """
+        if multi_prod == 0.0:
+            return 0.0
+        denom = max(raw_m, norm_m)
+        if denom > PROGRESS_DISTANCE_THRESHOLD_M:
+            return float(np.clip(raw_m / denom, 0.0, 1.0))
+        return 1.0
+
+    @classmethod
+    def _metrics_to_score(cls, metrics: dict, progress_norm_m: float) -> float:
+        """Convert metrics dict to scalar score.
+
+        :param metrics: per-trajectory metrics, including ``ep_raw_m``
+        :param progress_norm_m: shared ego-progress denominator in metres. Every
+            trajectory whose scores will be COMPARED must be passed the same
+            value, otherwise the comparison is between different scales.
+        """
         multi_prod = metrics['col'] * metrics['dac'] * metrics['ddc'] * metrics['tlc']
+        metrics['ep'] = cls._normalize_progress(
+            metrics.get('ep_raw_m', 0.0), multi_prod, progress_norm_m)
         weighted_sum = (W_PROGRESS * metrics['ep'] +
                         W_LANE_KEEPING * metrics['lk'] +
                         W_HISTORY_COMFORT * metrics['hc'] +
@@ -582,11 +624,15 @@ class TTAScorer(BaseTrajectoryScorer):
         ego_state: Dict[str, Any],
         n_execute: Optional[int],
         agents_per_t: list = None,
+        *,
+        progress_norm_m: float,
     ) -> float:
         """
         Score one candidate trajectory in world frame at current replan time.
 
         Args:
+            progress_norm_m: Shared ego-progress denominator in metres. Pass the
+                same value to every trajectory whose scores are compared.
             traj_world: (T, 2) future waypoints in world frame (no current point).
             frame_idx: Current scenario frame index.
             ego_state: Current ego state dict.
@@ -623,7 +669,7 @@ class TTAScorer(BaseTrajectoryScorer):
             agents_per_t=trimmed_agents,
             red_lanes_per_t=red_lanes_per_t,
         )
-        return self._metrics_to_score(metrics)
+        return self._metrics_to_score(metrics, progress_norm_m)
 
     # ---------------------------------------------------------------
     # Interpolation helper
@@ -759,7 +805,15 @@ class TTAScorer(BaseTrajectoryScorer):
 
         all_states = self._get_all_trajectory_states(all_paths_sim, self.planner_dt)
 
+        # Two passes: the ego-progress denominator is the best progress any
+        # non-disqualified candidate achieves, so no score is final until every
+        # candidate has been measured. The same denominator is then reused for
+        # the retained-trajectory comparison below, keeping all scores that get
+        # compared on one scale.
         scores = np.zeros(N)
+        all_metrics = [None] * N
+        raw_progress = np.zeros(N)
+        multi_prods = np.zeros(N)
         for i in range(N):
             states_i = {k: all_states[k][i] for k in all_states}
             metrics = self._calculate_metrics(
@@ -768,7 +822,15 @@ class TTAScorer(BaseTrajectoryScorer):
                 agents_per_t=agents_per_t,
                 red_lanes_per_t=red_lanes_per_t,
             )
-            scores[i] = self._metrics_to_score(metrics)
+            all_metrics[i] = metrics
+            raw_progress[i] = metrics['ep_raw_m']
+            multi_prods[i] = (metrics['col'] * metrics['dac']
+                              * metrics['ddc'] * metrics['tlc'])
+
+        masked_progress = raw_progress * (multi_prods > 0.0)
+        progress_norm_m = float(masked_progress.max()) if N else 0.0
+        for i in range(N):
+            scores[i] = self._metrics_to_score(all_metrics[i], progress_norm_m)
 
         # Step 1: Select top-K new candidates by full-horizon score
         top_k = min(5, N)
@@ -816,10 +878,16 @@ class TTAScorer(BaseTrajectoryScorer):
                             ego_state,
                             n_execute,
                             agents_per_t=agents_per_t,
+                            progress_norm_m=progress_norm_m,
                         )
 
                         # Step 2: Re-score top-K new candidates trimmed to same
-                        # horizon as old trajectory for fair comparison
+                        # horizon as old trajectory for fair comparison.
+                        # Both sides of this comparison are short-horizon and
+                        # share the full-batch ``progress_norm_m``. The shared
+                        # bound is what makes them comparable; the absolute
+                        # level is irrelevant because only prev-vs-trimmed is
+                        # compared here, never trimmed-vs-``scores``.
                         best_new_trimmed_score = -1.0
                         for idx in top_new_indices:
                             trimmed_world = candidates_world[idx][:n_planner]
@@ -829,6 +897,7 @@ class TTAScorer(BaseTrajectoryScorer):
                                 ego_state,
                                 n_execute,
                                 agents_per_t=agents_per_t,
+                                progress_norm_m=progress_norm_m,
                             )
                             if trimmed_score > best_new_trimmed_score:
                                 best_new_trimmed_score = trimmed_score

@@ -20,6 +20,28 @@ VEHICLE_POLYGON_COORDS = np.array([
 
 # Weights & Thresholds
 W_PROGRESS, W_TTC, W_LANE_KEEPING, W_HISTORY_COMFORT, W_EXTENDED_COMFORT = 5.0, 5.0, 2.0, 2.0, 2.0
+
+# Ego-progress normalisation (NAVSIM). Progress is a RATIO against a reference
+# upper bound, not an absolute distance: see NAVSIM (arXiv:2406.15349),
+# "The ego progress subscore represents the agent progress along the route
+# center as a ratio to an approximated safe upper bound [...] The final ratio
+# is clipped to [0, 1] while discarding low or negative progress scores if the
+# upper bound is below 5 meters."
+#
+# Reference implementation this mirrors:
+#   navsim .../score_module/train_pdm_scorer.py::_aggregate_scores
+#     raw       = progress_raw * multiplicative_prod
+#     denom     = maximum(raw, reference_progress)
+#     ep        = raw / denom            where denom  > threshold
+#     ep        = 1.0                    where denom <= threshold
+#     ep        = 0.0                    where denom <= threshold and prod == 0
+#
+# Upstream's reference is PDM-Closed's collision-free progress, cached per
+# scene. This closed-loop scorer has no PDM-Closed rollout, but it already
+# simulates the logged human driver every frame (see ``score_frame``), so the
+# human's raw progress is used as the reference bound. Deviation from NAVSIM is
+# deliberate and documented; see docs note in the commit introducing this.
+PROGRESS_DISTANCE_THRESHOLD_M = 5.0
 LANE_DEVIATION_LIMIT = 0.5  
 LANE_KEEPING_WINDOW = 2.0   
 TTC_HORIZON = 1.0
@@ -185,7 +207,7 @@ class EPDMSScorer:
     def _calculate_metrics(self, states, horizon, frame_idx, role="Agent", prev_states=None):
         metrics = {
             "nc": 1.0, "dac": 1.0, "ddc": 1.0, "tlc": 1.0,
-            "ep": 0.0, "ttc": 1.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
+            "ep": 0.0, "ep_raw_m": 0.0, "ttc": 1.0, "lk": 1.0, "hc": 1.0, "ec": 1.0
         }
         
         # 1. DAC
@@ -342,11 +364,43 @@ class EPDMSScorer:
             if (diff_acc > EC_ACCEL_THRESH or diff_jerk > EC_JERK_THRESH or diff_yr > EC_YAW_RATE_THRESH):
                 metrics['ec'] = 0.0
         
-        # 5. Progress
+        # 5. Progress, as RAW METRES. The normalised ``ep`` in [0, 1] is filled
+        # in by ``score_frame``, which is the only place holding both the agent
+        # and the reference (human) trajectory needed for the denominator.
         dist = np.linalg.norm(np.array([states['x'][-1], states['y'][-1]]) - np.array([states['x'][0], states['y'][0]]))
-        metrics['ep'] = min(dist / 30.0, 1.0)
-        
+        metrics['ep_raw_m'] = float(dist)
+
         return metrics
+
+    @staticmethod
+    def _normalize_progress(agent_raw_m: float, multi_prod: float,
+                            reference_raw_m: float) -> float:
+        """NAVSIM ego-progress: agent progress as a ratio to a safe upper bound.
+
+        Mirrors ``train_pdm_scorer.py::_aggregate_scores`` for a single
+        proposal. ``multi_prod`` masks the agent's progress so a disqualified
+        trajectory cannot earn progress credit, and the denominator is the
+        larger of the (masked) agent progress and the reference bound, so an
+        agent that outperforms the reference scores exactly 1.0 rather than
+        being clipped.
+
+        When the bound is below :data:`PROGRESS_DISTANCE_THRESHOLD_M` no
+        meaningful progress was available at this frame -- typically a
+        standstill or a red light -- and progress is not a useful
+        discriminator, so a qualifying agent receives 1.0 rather than being
+        penalised for physics it cannot beat.
+
+        :param agent_raw_m: agent's raw progress in metres
+        :param multi_prod: product of the binary multiplicative metrics
+            (NC x DAC x DDC x TLC); 0.0 disqualifies the trajectory
+        :param reference_raw_m: reference upper bound in metres
+        :return: normalised ego progress in [0, 1]
+        """
+        masked = agent_raw_m if multi_prod > 0.0 else 0.0
+        denom = max(masked, reference_raw_m)
+        if denom > PROGRESS_DISTANCE_THRESHOLD_M:
+            return float(np.clip(masked / denom, 0.0, 1.0))
+        return 0.0 if multi_prod == 0.0 else 1.0
 
     def score_frame(self, plan_traj: np.ndarray, frame_idx: int) -> Dict[str, float]:
         sdc_track = self.scenario_data['tracks'][self.sdc_id]
@@ -389,7 +443,13 @@ class EPDMSScorer:
         print(f"{'METRIC':<10} | {'AGENT':<5} | {'HUMAN':<5} | {'FINAL':<10}")
         print("-" * 45)
         
-        keys = ['nc', 'dac', 'ddc', 'tlc', 'ep', 'ttc', 'lk', 'hc', 'ec']
+        # ``ep`` is excluded here: the human-penalty filter is defined for the
+        # BINARY metrics (a human violation means the frame is unfair, so the
+        # agent is not penalised). Progress is continuous, and the human is
+        # already accounted for as the reference bound in the normalisation
+        # below -- running it through an ``== 0.0`` test as well would both
+        # double-count the human and almost never fire.
+        keys = ['nc', 'dac', 'ddc', 'tlc', 'ttc', 'lk', 'hc', 'ec']
         for m in keys:
             agent_val = agent_metrics.get(m, 0.0)
             human_val = human_metrics.get(m, 1.0) if human_metrics else "N/A"
@@ -401,7 +461,30 @@ class EPDMSScorer:
             print(f"{m.upper():<10} | {agent_val:.1f}   | {h_str:<5} | {final_val:.1f}")
 
         multi_prod = (final_metrics['nc'] * final_metrics['dac'] * final_metrics['ddc'] * final_metrics['tlc'])
-        weighted_sum = (W_PROGRESS * final_metrics['ep'] + W_TTC * final_metrics['ttc'] + 
+
+        # Ego progress, normalised against the logged human driver as the
+        # reference upper bound (NAVSIM uses PDM-Closed; see the note on
+        # PROGRESS_DISTANCE_THRESHOLD_M). Must follow ``multi_prod``, which
+        # masks a disqualified trajectory's progress to zero.
+        agent_raw_m = float(agent_metrics.get('ep_raw_m', 0.0))
+        # The bound must be SAFE progress: NAVSIM's PDM-Closed reference is
+        # collision- and off-road-free by construction, so a human who gained
+        # distance by running a light must not set a bar the agent is then
+        # measured against. A violating human contributes no bound, which
+        # leaves the agent normalised against itself -- consistent with the
+        # penalty filter above, where a human violation already means this
+        # frame cannot fairly penalise the agent.
+        human_raw_m = 0.0
+        if human_metrics:
+            human_multi = (human_metrics['nc'] * human_metrics['dac']
+                           * human_metrics['ddc'] * human_metrics['tlc'])
+            if human_multi > 0.0:
+                human_raw_m = float(human_metrics.get('ep_raw_m', 0.0))
+        final_metrics['ep'] = self._normalize_progress(agent_raw_m, multi_prod, human_raw_m)
+        final_metrics['ep_raw_m'] = agent_raw_m
+        print(f"{'EP':<10} | {agent_raw_m:.1f}m  | {human_raw_m:.1f}m  | {final_metrics['ep']:.1f}")
+
+        weighted_sum = (W_PROGRESS * final_metrics['ep'] + W_TTC * final_metrics['ttc'] +
                         W_LANE_KEEPING * final_metrics['lk'] + W_HISTORY_COMFORT * final_metrics['hc'] + 
                         W_EXTENDED_COMFORT * final_metrics['ec'])
         weighted_avg = weighted_sum / (W_PROGRESS + W_TTC + W_LANE_KEEPING + W_HISTORY_COMFORT + W_EXTENDED_COMFORT)
