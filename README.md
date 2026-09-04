@@ -17,6 +17,7 @@ BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end au
 
 ## News
 
+- **`2026/09`**: BridgeSim is accepted by [CoRL 2026](https://www.corl.org/)!
 - **`2026/04`**: BridgeSim paper and codebase release. BridgeSim-NavHard Leaderboard release.
 
 ## ✅ Currently Supported Features
