@@ -17,6 +17,7 @@
 
 ## News
 
+- **`2026/10`**: Check out our continuous works from BridgeSim, [DreamStream (CoRL 2026)](https://arxiv.org/pdf/2609.26792) and [NavSafe-∞](https://arxiv.org/abs/2609.26618)!
 - **`2026/09`**: BridgeSim is accepted by [CoRL 2026](https://www.corl.org/)!
 - **`2026/04`**: BridgeSim paper and codebase release. BridgeSim-NavHard Leaderboard release.
 
