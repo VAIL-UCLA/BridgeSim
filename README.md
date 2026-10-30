@@ -15,6 +15,10 @@
 
 [CoRL 2026] BridgeSim is a cross-simulator closed-loop evaluation platform for end-to-end autonomous driving policies, built on the [MetaDrive](https://github.com/metadriverse/metadrive) simulator. It supports evaluating models trained on NavSim and Bench2Drive across multiple real-world datasets (NavSim, Waymo, nuScenes, and more). BridgeSim provides a unified evaluation interface that bridges the gap between training-time datasets and deployment-time environments, enabling fair and reproducible benchmarking across diverse driving scenarios.
 
+> **`dreamstream` branch:** closed-loop evaluation with generated camera observations from
+> [DreamStream](https://arxiv.org/abs/2609.26792) and front-camera-only policies. See
+> [docs/dreamstream.md](docs/dreamstream.md).
+
 ## News
 
 - **`2026/10`**: Check out our continuous works from BridgeSim, [DreamStream (CoRL 2026)](https://arxiv.org/pdf/2609.26792) and [NavSafe-∞](https://arxiv.org/abs/2609.26618)!

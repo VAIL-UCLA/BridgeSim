@@ -520,7 +520,7 @@ def main():
                         help="Enable BEV calibrator for domain adaptation (MetaDrive -> Bench2Drive)")
 
     parser.add_argument('--bev-calibrator-checkpoint', type=str,
-                        default="/home/zhihao/workspace/BridgeSim/calibration/checkpoints/BridgeSim-BevFlow/uniad-b2d/lr1e-4/epoch=9-step=24450.ckpt",
+                        default=None,
                         help="Path to BEV calibrator checkpoint (.ckpt file)")
 
     parser.add_argument('--bev-sample-steps', type=int, default=50,

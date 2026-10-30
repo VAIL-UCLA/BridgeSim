@@ -65,7 +65,7 @@ class EnvironmentManager:
 
             # Camera sensor configuration
             "sensors": {
-                "rgb_camera": (RGBCamera, 900, 900),
+                "rgb_camera": (RGBCamera, 1600, 900),
             },
             "image_observation": True,
 

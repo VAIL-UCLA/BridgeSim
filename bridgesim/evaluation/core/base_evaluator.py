@@ -7,6 +7,8 @@ import os
 import sys
 import traceback
 import contextlib
+import shutil
+import subprocess
 import numpy as np
 import cv2
 import pandas as pd
@@ -102,6 +104,7 @@ class BaseEvaluator:
                  runtime_point_cloud_lidar_height: int = 64,
                  runtime_point_cloud_lidar_fov: float = 90.0,
                  save_runtime_lidar: bool = False,
+                 vis_proposals: bool = True,
                  ):
         """
         Initialize evaluator.
@@ -120,6 +123,8 @@ class BaseEvaluator:
             ego_replay_frames: Number of initial frames to replay ego log actions (inference still runs)
             eval_frames: Number of frames to evaluate after ego replay (None = full scenario)
             score_start_frame: Frame to start calculating scores (None = use ego_replay_frames)
+            vis_proposals: Draw all proposal trajectories (colored by PDM score) on
+                both the cam_f0 overlay and the top-down BEV. Default True.
         """
         self.model_adapter = model_adapter
         self.sim_dt = sim_dt
@@ -148,6 +153,7 @@ class BaseEvaluator:
         self.runtime_point_cloud_lidar_height = int(runtime_point_cloud_lidar_height)
         self.runtime_point_cloud_lidar_fov = float(runtime_point_cloud_lidar_fov)
         self.save_runtime_lidar = save_runtime_lidar
+        self.vis_proposals = vis_proposals
 
         assert replan_rate 
 
@@ -180,6 +186,8 @@ class BaseEvaluator:
         self.last_replan_frame = -1  # Track when last replan happened
         self.cached_prediction_position = None  # Ego position at prediction time (for candidate visualization)
         self.cached_prediction_heading = None  # Ego heading at prediction time (for candidate visualization)
+        self.cached_proposals_world = None  # (K, T, 2) proposals in world coords (for cam_f0 overlay)
+        self.cached_proposal_scores = None  # (K,) PDM scores matching cached_proposals_world
         self.ego_log_actions = []
         self.warned_missing_ego_actions = False
 
@@ -311,9 +319,23 @@ class BaseEvaluator:
 
     def load_scenario(self):
         """Load scenario data from pickle file."""
-        
+
+        # A single scenario .pkl can be passed directly
+        if self.scenario_path.suffix == '.pkl':
+            with open(self.scenario_path, 'rb') as f:
+                try:
+                    import pickle5
+                    self.scenario_data = pickle5.load(f)
+                except:
+                    import pickle
+                    self.scenario_data = pickle.load(f)
+
+            self.sdc_id = self.scenario_data['metadata']['sdc_id']
+            self.scenario_path = self.scenario_path.parent
+            return
+
         scenario_subfolder = self.scenario_path / f"{self.scenario_name}_0"
-        scenario_pkl_files = list(scenario_subfolder.glob("*.pkl"))
+        scenario_pkl_files = list(scenario_subfolder.glob("sd_*.pkl"))
 
         if not scenario_pkl_files:
             raise FileNotFoundError(f"No .pkl file found in {scenario_subfolder}")
@@ -737,7 +759,8 @@ class BaseEvaluator:
             'angular_velocity': angular_velocity
         }
 
-    def render_topdown_bev(self, env, frame_id, ego_position, ego_heading, next_waypoint, command=None, planned_traj_world=None, planned_traj_ego=None):
+    def render_topdown_bev(self, env, frame_id, ego_position, ego_heading, next_waypoint, command=None, planned_traj_world=None, planned_traj_ego=None,
+                           proposals_world=None, proposal_scores=None):
         """
         Render and save top-down BEV visualization with route waypoints.
 
@@ -819,6 +842,29 @@ class BaseEvaluator:
                     radius = 5 if visible_idx % 10 == 0 else 2
                     cv2.circle(topdown_frame, (px, py), radius, (0, 0, 255), -1)
                 visible_idx += 1
+
+            # Draw all proposal trajectories color-coded by PDM score, beneath
+            # the selected plan. Red (low score) -> green (high score), BGR.
+            if self.vis_proposals and proposals_world is not None and proposal_scores is not None:
+                props_arr = np.asarray(proposals_world, dtype=float)
+                scores_arr = np.asarray(proposal_scores, dtype=float).reshape(-1)
+                if props_arr.ndim == 3 and props_arr.shape[0] == len(scores_arr) and props_arr.shape[0] > 0:
+                    smin, smax = float(scores_arr.min()), float(scores_arr.max())
+                    denom = max(smax - smin, 1e-6)
+                    overlay = topdown_frame.copy()
+                    for k in np.argsort(scores_arr):  # worst -> best so best is on top
+                        pts = []
+                        for wp in props_arr[k]:
+                            px, py = world_to_pixel(wp)
+                            if is_in_bounds(px, py):
+                                pts.append((px, py))
+                        if len(pts) < 2:
+                            continue
+                        s_norm = (scores_arr[k] - smin) / denom
+                        color_k = (0, int(255 * s_norm), int(255 * (1.0 - s_norm)))
+                        pts_np = np.array(pts, dtype=np.int32)
+                        cv2.polylines(overlay, [pts_np], False, color_k, 1, cv2.LINE_AA)
+                    cv2.addWeighted(overlay, 0.6, topdown_frame, 0.4, 0, topdown_frame)
 
             # Draw planned trajectory (cyan/yellow gradient line with dots)
             if planned_traj_world is not None and len(planned_traj_world) > 0:
@@ -948,6 +994,75 @@ class BaseEvaluator:
 
         except Exception as e:
             print(f"Warning: Failed to render top-down view at frame {frame_id}: {e}")
+
+    def _get_clean_bev_renderer(self, env, req_scaling, render_size):
+        """Build (and cache per map) a higher-resolution TopDownRenderer for the
+        clean BEV, separate from the main visualization renderer."""
+        from metadrive.engine.top_down_renderer import TopDownRenderer
+        cur_map = env.engine.current_map
+        r = getattr(self, "_clean_bev_renderer", None)
+        if r is not None and getattr(self, "_clean_bev_map", None) is cur_map:
+            return r
+        if r is not None:
+            try:
+                r.clear()
+            except Exception:
+                pass
+        r = TopDownRenderer(
+            film_size=(10000, 10000),
+            scaling=req_scaling,
+            screen_size=(render_size, render_size),
+            semantic_map=True,
+            draw_target_vehicle_trajectory=False,
+            window=False,
+            num_stack=1,
+        )
+        self._clean_bev_renderer = r
+        self._clean_bev_map = cur_map
+        return r
+
+    def render_topdown_bev_clean(self, env, frame_id, ego_position, ego_heading):
+        """
+        Render a clean top-down BEV (semantic map + agent boxes, no overlays),
+        centered on the ego with its heading pointing right, covering
+        self.clean_bev_range_m meters (default 72). Saved as topdown_clean.png.
+        """
+        frame_output_path = self.output_dir / f"{frame_id:05d}"
+        frame_output_path.mkdir(parents=True, exist_ok=True)
+
+        out_size = 800
+        range_m = float(getattr(self, "clean_bev_range_m", 72.0))
+        req_scaling = out_size / range_m
+        # Render a larger square so the rotated crop has no empty corners.
+        render_size = int(np.ceil(out_size * 1.6))
+
+        try:
+            renderer = self._get_clean_bev_renderer(env, req_scaling, render_size)
+            topdown_frame = np.asarray(renderer.render(text={}, to_image=True))
+            S = topdown_frame.shape[0]
+            center_px = S // 2
+            scaling = renderer.scaling  # actual px/m (may be clamped on big maps)
+
+            # Rotate about the ego so its heading points right.
+            angle_deg = -np.degrees(ego_heading)
+            M = cv2.getRotationMatrix2D((center_px, center_px), angle_deg, 1.0)
+            topdown_frame = cv2.warpAffine(
+                topdown_frame, M, (S, S),
+                flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0),
+            )
+
+            half_px = int(round((range_m / 2.0) * scaling))
+            half_px = max(20, min(half_px, center_px))
+            crop = topdown_frame[center_px - half_px:center_px + half_px,
+                                 center_px - half_px:center_px + half_px]
+            if crop.shape[0] != out_size:
+                interp = cv2.INTER_AREA if crop.shape[0] > out_size else cv2.INTER_CUBIC
+                crop = cv2.resize(crop, (out_size, out_size), interpolation=interp)
+
+            cv2.imwrite(str(frame_output_path / "topdown_clean.png"), crop)
+
+        except Exception as e:
+            print(f"Warning: Failed to render clean top-down view at frame {frame_id}: {e}")
 
     def render_topdown_bev_candidates_topk(self, env, frame_id, ego_position, ego_heading,
                                            trajectory_topk_ego, topk_scores=None, planned_traj_world=None,
@@ -1499,6 +1614,204 @@ class BaseEvaluator:
         except Exception as e:
             print(f"Warning: Failed to render replan summary: {e}")
 
+    @staticmethod
+    def _pixel_ribbon(pts, half_w):
+        """Build a filled ribbon polygon (M,2 int32) around a pixel polyline by
+        offsetting each segment +/- half_w along its normal. Returns None if
+        degenerate."""
+        pts = np.asarray(pts, dtype=float)
+        if len(pts) < 2:
+            return None
+        left, right = [], []
+        for i in range(len(pts) - 1):
+            seg = pts[i + 1] - pts[i]
+            n = np.linalg.norm(seg)
+            if n < 1e-6:
+                continue
+            u = seg / n
+            nrm = np.array([-u[1], u[0]])
+            left.append(pts[i] + half_w * nrm)
+            right.append(pts[i] - half_w * nrm)
+        seg = pts[-1] - pts[-2]
+        n = np.linalg.norm(seg)
+        if n > 1e-6:
+            u = seg / n
+            nrm = np.array([-u[1], u[0]])
+            left.append(pts[-1] + half_w * nrm)
+            right.append(pts[-1] - half_w * nrm)
+        if len(left) < 2:
+            return None
+        return np.vstack([np.array(left), np.array(right)[::-1]]).astype(np.int32)
+
+    @staticmethod
+    def _draw_dashed_polyline(img, pts, color, thickness=2, dash=6, gap=4, closed=True):
+        """Draw a dashed polyline (or closed polygon) through pixel pts (N, 2)."""
+        pts = np.asarray(pts, dtype=float)
+        n = len(pts)
+        if n < 2:
+            return
+        order = list(range(n)) + ([0] if closed else [])
+        for j in range(len(order) - 1):
+            p1, p2 = pts[order[j]], pts[order[j + 1]]
+            seg = p2 - p1
+            length = float(np.linalg.norm(seg))
+            if length < 1e-6:
+                continue
+            u = seg / length
+            pos = 0.0
+            while pos < length:
+                a = p1 + u * pos
+                b = p1 + u * min(pos + dash, length)
+                cv2.line(img, (int(round(a[0])), int(round(a[1]))),
+                         (int(round(b[0])), int(round(b[1]))), color, thickness, cv2.LINE_AA)
+                pos += dash + gap
+
+    def render_replan_summary_clean(self, env, final_ego_position):
+        """
+        High-resolution top-down summary of the executed ego trajectory over the
+        clean BEV map, rotated so the frame-0 heading points up and cropped to
+        the trajectory. Saved as replan_summary_clean.png at the end of a run.
+        """
+        if len(self.planning_history) == 0:
+            print("No planning history to render.")
+            return
+
+        # Executed trajectory (world) = concatenated consumed portions of each plan.
+        segs = []
+        for _pf, world_traj, _pp, _ph, consumed, _tk in self.planning_history:
+            if world_traj is not None and consumed and consumed > 0:
+                segs.append(np.asarray(world_traj[:consumed], dtype=float)[:, :2])
+        if not segs:
+            print("No executed trajectory to render for clean replan summary.")
+            return
+        traj = np.concatenate(segs, axis=0)
+        if len(traj) < 2:
+            return
+
+        # Frame-0 ego heading (first plan is at frame 0) for the "facing up" rotation.
+        h0 = float(self.planning_history[0][3])
+
+        traj_color = (255, 255, 0)    # cyan ribbon (BGR)
+        start_color = (200, 60, 0)    # frame-0 start marker (BGR)
+
+        renderer = None
+        try:
+            from metadrive.engine.top_down_renderer import TopDownRenderer
+
+            center = traj.mean(axis=0)
+            radius = max(float(np.max(np.linalg.norm(traj - center, axis=1))), 5.0)
+
+            # Pick px/m so the rotated trajectory fits within a capped canvas.
+            req_scaling = float(getattr(self, "summary_scaling", 8.0))
+            margin_px = 60
+            rot_margin = 1.45  # ~sqrt(2) so the heading rotation never clips
+            cap = 4000
+            screen_size = int(2 * radius * req_scaling * rot_margin + 2 * margin_px)
+            if screen_size > cap:
+                req_scaling = (cap - 2 * margin_px) / (2 * radius * rot_margin)
+                screen_size = cap
+            screen_size = max(screen_size, 800)
+
+            # Reuse the shared renderer's agent history so agents keep their tails.
+            shared = getattr(env.engine, "top_down_renderer", None)
+            num_stack = 140
+            if shared is not None and getattr(shared, "history_objects", None):
+                num_stack = shared.history_objects.maxlen or 140
+
+            renderer = TopDownRenderer(
+                film_size=(10000, 10000),
+                scaling=req_scaling,
+                screen_size=(screen_size, screen_size),
+                semantic_map=True,
+                draw_target_vehicle_trajectory=False,  # we draw our own ego ribbon
+                window=False,
+                num_stack=num_stack,
+                camera_position=(float(center[0]), float(center[1])),
+            )
+            if shared is not None and getattr(shared, "history_objects", None):
+                from collections import deque as _deque
+                renderer.history_objects = _deque(
+                    list(shared.history_objects), maxlen=num_stack)
+
+            img = np.asarray(renderer.render(text={}, to_image=True))
+            scaling = renderer.scaling  # actual px/m (clamped to film/map on big maps)
+            cx = cy = screen_size // 2
+
+            # World -> pixel (centered on the trajectory).
+            d = traj - center
+            tx = cx + d[:, 0] * scaling
+            ty = cy - d[:, 1] * scaling
+            pts = np.stack([tx, ty], axis=1)
+
+            # Executed ego trajectory as a filled ribbon + frame-0 start marker.
+            half_w = max(2.0, float(getattr(self, "summary_path_width", 0.9)) * scaling)
+            ribbon = self._pixel_ribbon(pts, half_w)
+            if ribbon is not None:
+                ov = img.copy()
+                cv2.fillPoly(ov, [ribbon], traj_color)
+                cv2.addWeighted(ov, 0.6, img, 0.4, 0, img)
+                edge = tuple(int(c * 0.6) for c in traj_color)
+                cv2.polylines(img, [ribbon], True, edge, 2, cv2.LINE_AA)
+            cv2.circle(img, (int(round(tx[0])), int(round(ty[0]))),
+                       max(5, int(round(0.7 * scaling))), start_color, -1, cv2.LINE_AA)
+
+            # Dashed ego footprint every 2 s, heading from the path tangent.
+            sim_dt = float(getattr(self, "sim_dt", 0.1))
+            ego_len = float(getattr(env.agent, "top_down_length", 4.6))
+            ego_wid = float(getattr(env.agent, "top_down_width", 2.0))
+            local = np.array([[ego_len / 2, ego_wid / 2], [ego_len / 2, -ego_wid / 2],
+                              [-ego_len / 2, -ego_wid / 2], [-ego_len / 2, ego_wid / 2]])
+            dash = max(4, int(round(0.5 * scaling)))
+            gap = max(3, int(round(0.35 * scaling)))
+            for t in range(0, 15, 2):  # 0,2,4,6,8,10,12,14 s
+                k = int(round(t / sim_dt))
+                if k >= len(traj):
+                    continue
+                a, b = max(0, k - 1), min(len(traj) - 1, k + 1)
+                tang = traj[b] - traj[a]
+                hk = h0 if np.linalg.norm(tang) < 1e-6 else float(np.arctan2(tang[1], tang[0]))
+                ch, sh = np.cos(hk), np.sin(hk)
+                rot_t = np.array([[ch, sh], [-sh, ch]])  # offset = local @ R^T
+                corners_w = traj[k] + local @ rot_t
+                cdx = corners_w - center
+                box_px = np.stack([cx + cdx[:, 0] * scaling, cy - cdx[:, 1] * scaling], axis=1)
+                self._draw_dashed_polyline(img, box_px, (64, 64, 64),
+                                           thickness=2, dash=dash, gap=gap, closed=True)
+
+            # Rotate so the frame-0 heading points up.
+            A = 90.0 - np.degrees(h0)
+            M = cv2.getRotationMatrix2D((cx, cy), A, 1.0)
+            img = cv2.warpAffine(img, M, (screen_size, screen_size),
+                                 flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
+
+            # Crop around the rotated trajectory, keeping a moderate aspect ratio.
+            pr = (M[:, :2] @ pts.T).T + M[:, 2]
+            bx0, bx1 = float(pr[:, 0].min()), float(pr[:, 0].max())
+            by0, by1 = float(pr[:, 1].min()), float(pr[:, 1].max())
+            L = max(bx1 - bx0, by1 - by0, 1.0)
+            pad = max(margin_px, 0.12 * L)
+            bx0, bx1, by0, by1 = bx0 - pad, bx1 + pad, by0 - pad, by1 + pad
+            cxb, cyb = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+            min_half = 0.3 * L
+            half_w = max((bx1 - bx0) / 2.0, min_half)
+            half_h = max((by1 - by0) / 2.0, min_half)
+            x0 = int(max(0, cxb - half_w))
+            x1 = int(min(screen_size, cxb + half_w))
+            y0 = int(max(0, cyb - half_h))
+            y1 = int(min(screen_size, cyb + half_h))
+            if x1 > x0 and y1 > y0:
+                img = img[y0:y1, x0:x1]
+
+            cv2.imwrite(str(self.output_dir / "replan_summary_clean.png"), img)
+        except Exception as e:
+            print(f"Warning: Failed to render clean replan summary: {e}")
+        finally:
+            if renderer is not None:
+                try:
+                    renderer.clear()
+                except Exception:
+                    pass
+
     def visualize_segmentation(self, frame_id, seg_output_path):
         """
         Visualize segmentation outputs (drivable area, lanes) as BEV image.
@@ -1618,25 +1931,83 @@ class BaseEvaluator:
         except Exception as e:
             print(f"Warning: Failed to visualize BEV embeddings at frame {frame_id}: {e}")
 
-    def render_cam_f0_vis(self, env, frame_id, ego_state, plan_traj_ego):
+    def render_cam_f0_vis(self, env, frame_id, ego_state, plan_traj_ego,
+                          proposals_ego=None, proposal_scores=None,
+                          is_replay=None, is_replan=None):
         """
-        Annotate the saved cam_f0.jpg with projected planned trajectory, route waypoints,
-        and target waypoint using the reference visualizer style (ribbon overlay).
+        Annotate a front-camera frame with the projected planned trajectory,
+        route waypoints, and target waypoint.
 
         plan_traj_ego: (N, 2) array — col0 = lateral (left+), col1 = forward (meters).
-        Reads cam_f0.jpg, draws overlays in-place, and overwrites the file.
+        proposals_ego: optional (K, T, 2) array of candidate trajectories in the
+            current ego frame (same axis convention as plan_traj_ego).
+        proposal_scores: optional (K,) array of scalar scores (e.g. PDM score)
+            aligned with proposals_ego; used to color-code each proposal.
+
+        With ego_state and plan_traj_ego, the overlay args are saved to
+        render_cam_f0_vis_args.pkl and drawn on cam_f0_md.jpg (the MetaDrive
+        view, if saved). With both None, the saved args are drawn on cam_f0.jpg;
+        this deferred call lets DreamStream frames be annotated once the server
+        has returned them.
         """
+        import pickle
         frame_output_path = self.output_dir / f"{frame_id:05d}"
-        cam_path = frame_output_path / "cam_f0.jpg"
-        if not cam_path.exists():
-            return
+        pickle_path = frame_output_path / "render_cam_f0_vis_args.pkl"
+
+        if ego_state is not None and plan_traj_ego is not None:
+            try:
+                frame_output_path.mkdir(parents=True, exist_ok=True)
+                with open(pickle_path, "wb") as f:
+                    pickle.dump({
+                        "frame_id": frame_id,
+                        "ego_state": ego_state,
+                        "plan_traj_ego": plan_traj_ego,
+                        "model_name": type(self.model_adapter).__name__.replace('Adapter', ''),
+                        "route": self.route,
+                        "is_crash": env.agent.crash_vehicle or env.agent.crash_object or env.agent.crash_human,
+                        "proposals_ego": proposals_ego,
+                        "proposal_scores": proposal_scores,
+                        "is_replay": is_replay,
+                        "is_replan": is_replan,
+                    }, f)
+            except Exception as e:
+                print(f"Warning: failed to save cam_f0_vis args pickle at frame {frame_id}: {e}")
+
+        deferred = (ego_state is None and plan_traj_ego is None)
+
         try:
             import sys as _sys
             _scripts_dir = str(Path(__file__).resolve().parent.parent.parent.parent / "scripts")
             if _scripts_dir not in _sys.path:
                 _sys.path.insert(0, _scripts_dir)
-            from vis_trajectory_on_cam import draw_trajectory_ribbon
+            from vis_trajectory_on_cam import draw_trajectory_polyline as draw_trajectory_ribbon
 
+            if deferred:
+                if not pickle_path.exists():
+                    print(f"Warning: missing pickle for cam_f0_vis at frame {frame_id}")
+                    return
+                with open(pickle_path, "rb") as f:
+                    args = pickle.load(f)
+                assert frame_id == args["frame_id"]
+                ego_state = args["ego_state"]
+                plan_traj_ego = args["plan_traj_ego"]
+                route = args["route"]
+                model_name = args["model_name"]
+                is_crash = args["is_crash"]
+                proposals_ego = args.get("proposals_ego")
+                proposal_scores = args.get("proposal_scores")
+                is_replay = args.get("is_replay")
+                is_replan = args.get("is_replan")
+                cam_path = frame_output_path / "cam_f0.jpg"
+            else:
+                route = self.route if self.route and len(self.route) > 0 else None
+                model_name = type(self.model_adapter).__name__.replace('Adapter', '')
+                v = env.agent
+                is_crash = v.crash_vehicle or v.crash_object or v.crash_human
+                cam_path = frame_output_path / "cam_f0_md.jpg"
+
+            if not cam_path.exists():
+                return
             img = cv2.imread(str(cam_path))
             if img is None:
                 return
@@ -1658,8 +2029,8 @@ class BaseEvaluator:
             # ---- Route waypoints in ego frame (first 20, matching reference) ----
             # Use [:2] to guard against 3D positions in route entries
             route_ego = None
-            if self.route and len(self.route) > 0:
-                rp = np.array([entry[0][:2] for entry in list(self.route)[:20]], dtype=float)
+            if route and len(route) > 0:
+                rp = np.array([entry[0][:2] for entry in list(route)[:20]], dtype=float)
                 dr = rp - ego_pos
                 route_ego = np.empty((len(rp), 2), dtype=float)
                 route_ego[:, 0] = sin_h * dr[:, 0] + cos_h * dr[:, 1]
@@ -1673,10 +2044,34 @@ class BaseEvaluator:
                 target_ego = np.array([sin_h * dt[0] + cos_h * dt[1],
                                        cos_h * dt[0] - sin_h * dt[1]])
 
-            # ---- Draw ribbon (yellow), route dots (red), target pole (green) ----
-            # target_pt_ego is passed to draw_trajectory_ribbon which calls
-            # _draw_route_and_target: projects base (z=0) and top (z=1.5),
-            # draws a green vertical pole + sphere, matching the reference exactly.
+            # ---- Draw all proposal trajectories first (below selected ribbon) ----
+            if self.vis_proposals and proposals_ego is not None and proposal_scores is not None:
+                from vis_trajectory_on_cam import project_ego_waypoints_to_camera
+                proposals_arr = np.asarray(proposals_ego, dtype=float)
+                scores_arr = np.asarray(proposal_scores, dtype=float).reshape(-1)
+                if proposals_arr.ndim == 3 and proposals_arr.shape[0] == len(scores_arr) and proposals_arr.shape[0] > 0:
+                    smin, smax = float(scores_arr.min()), float(scores_arr.max())
+                    denom = max(smax - smin, 1e-6)
+                    overlay = img.copy()
+                    # Draw worst → best so the highest-scoring proposal is on top.
+                    order = np.argsort(scores_arr)
+                    for k in order:
+                        traj_k = proposals_arr[k]
+                        pts_k, valid_k = project_ego_waypoints_to_camera(traj_k, cam_cfg, img.shape)
+                        if not np.any(valid_k):
+                            continue
+                        pts_k = pts_k[valid_k]
+                        pts_k = np.vstack([[[W / 2, H - 1]], pts_k])
+                        pts_k[:, 0] = np.clip(pts_k[:, 0], 0, W - 1)
+                        pts_k[:, 1] = np.clip(pts_k[:, 1], 0, H - 1)
+                        pts_k = pts_k.astype(np.int32)
+                        s_norm = (scores_arr[k] - smin) / denom
+                        # Red (low) → green (high), BGR.
+                        color_k = (0, int(255 * s_norm), int(255 * (1.0 - s_norm)))
+                        cv2.polylines(overlay, [pts_k], False, color_k, 1, cv2.LINE_AA)
+                    cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+
+            # ---- Draw polyline (yellow), route dots (red), target pole (green) ----
             img = draw_trajectory_ribbon(
                 img,
                 plan_traj_ego if plan_traj_ego is not None else np.zeros((0, 2)),
@@ -1690,17 +2085,28 @@ class BaseEvaluator:
 
             # ---- HUD (reference style: green text or red crash bar) ----
             speed = float(np.linalg.norm(ego_state.get('velocity', np.zeros(3))[:2])) * 3.6
-            model_name = type(self.model_adapter).__name__.replace('Adapter', '')
-            v = env.agent
-            is_crash = v.crash_vehicle or v.crash_object or v.crash_human
+
+            replay_str = "True" if is_replay else "False"
+            replan_str = "True" if is_replan else "False"
+            status_suffix = f"  |  Replay: {replay_str}  |  Plan: {replan_str}"
 
             if is_crash:
                 cv2.rectangle(img, (0, 0), (W, 35), (0, 0, 180), -1)
-                cv2.putText(img, f"CRASH!  |  Frame {frame_id}  {speed:.0f}km/h",
+                cv2.putText(img, f"CRASH!  |  Frame {frame_id}  |  {speed:.0f}km/h{status_suffix}",
                             (10, 25), F, 0.7, (255, 255, 255), 2)
             else:
-                cv2.putText(img, f"{model_name}  |  Frame {frame_id}  {speed:.0f}km/h",
+                cv2.putText(img, f"{model_name}  |  Frame {frame_id}  |  {speed:.0f}km/h{status_suffix}",
                             (10, 25), F, 0.6, (0, 220, 0), 2)
+
+            hud_color = (255, 255, 255) if is_crash else (0, 220, 0)
+            if self.vis_proposals and proposal_scores is not None:
+                _ps = np.asarray(proposal_scores, dtype=float).reshape(-1)
+                if _ps.size:
+                    cv2.putText(
+                        img,
+                        f"PDM K={_ps.size}  best={_ps.max():.2f}  mean={_ps.mean():.2f}  min={_ps.min():.2f}",
+                        (10, 55), F, 0.6, hud_color, 2,
+                    )
 
             cv2.imwrite(str(cam_path), img)
         except Exception as e:
@@ -1725,6 +2131,25 @@ class BaseEvaluator:
                     writer.write(frame)
             writer.release()
             print(f"✓ Saved MP4 to: {mp4_path}")
+
+            try:
+                if shutil.which("ffmpeg") is None:
+                    raise FileNotFoundError("ffmpeg not found in PATH")
+                tmp_path = mp4_path.with_suffix(".h264.mp4")
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-i", str(mp4_path),
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        str(tmp_path),
+                    ],
+                    check=True,
+                )
+                os.replace(tmp_path, mp4_path)
+                print(f"✓ Re-encoded MP4 to H.264: {mp4_path}")
+            except Exception as e:
+                print(f"Note: Skipping H.264 re-encode for {filename}: {e}")
         except Exception as e:
             print(f"Warning: Failed to generate {filename}: {e}")
 
@@ -1779,14 +2204,6 @@ class BaseEvaluator:
         # Cache target waypoint for next frame's cam visualization
         self._cached_target_waypoint = waypoint_pos
 
-        # 4. Prepare model input
-        model_input = self.model_adapter.prepare_input(
-            images=imgs,
-            ego_state=ego_state,
-            scenario_data=self.scenario_data,
-            frame_id=frame_id
-        )
-
         # 5. Determine if we need to replan
         # During replay: inference at frame 0 and every replan_rate (for warmup)
         # After replay: force replan at ego_replay_frames, then every replan_rate from there
@@ -1807,6 +2224,14 @@ class BaseEvaluator:
 
         # 6. Run inference only when it's time to replan
         if needs_replan:
+            # Prepare model input
+            model_input = self.model_adapter.prepare_input(
+                images=imgs,
+                ego_state=ego_state,
+                scenario_data=self.scenario_data,
+                frame_id=frame_id
+            )
+
             # Set simulation time for temporal consistency scoring (if supported)
             current_sim_time = frame_id * self.sim_dt
             if hasattr(self.model_adapter, 'set_simulation_time'):
@@ -1836,6 +2261,23 @@ class BaseEvaluator:
             # Store ego pose at prediction time for candidate trajectory visualization
             self.cached_prediction_position = ego_state['position'].copy()
             self.cached_prediction_heading = ego_state['heading']
+
+            # Cache proposals (K, T, 2) in world coords with their PDM scores for
+            # the overlays. `proposals` is (K, T, 3) in the prediction-time ego
+            # frame, ordered (forward, lateral, heading).
+            proposals_pred = parsed_output.get('proposals', None)
+            pdm_score = parsed_output.get('pdm_score', None)
+            if proposals_pred is not None and pdm_score is not None:
+                proposals_pred = np.asarray(proposals_pred)
+                fwd = proposals_pred[..., 0]
+                lat = proposals_pred[..., 1]
+                prop_world_x = ego_state['position'][0] + cos_h * fwd - sin_h * lat
+                prop_world_y = ego_state['position'][1] + sin_h * fwd + cos_h * lat
+                self.cached_proposals_world = np.stack((prop_world_x, prop_world_y), axis=-1)
+                self.cached_proposal_scores = np.asarray(pdm_score, dtype=float)
+            else:
+                self.cached_proposals_world = None
+                self.cached_proposal_scores = None
 
             # Update planning history for replan summary visualization
             # Update consumed_count for the previous plan (it was consumed up to replan_rate waypoints)
@@ -1944,9 +2386,32 @@ class BaseEvaluator:
             self.render_topdown_bev(
                 env, frame_id, ego_state['position'], ego_state['heading'],
                 ego_state['waypoint'], ego_state['command'],
-                planned_traj_world=world_traj, planned_traj_ego=plan_traj
+                planned_traj_world=world_traj, planned_traj_ego=plan_traj,
+                proposals_world=self.cached_proposals_world,
+                proposal_scores=self.cached_proposal_scores,
             )
-            self.render_cam_f0_vis(env, frame_id, ego_state, plan_traj)
+            self.render_topdown_bev_clean(
+                env, frame_id, ego_state['position'], ego_state['heading'],
+            )
+            # Re-project cached proposals into the current ego frame.
+            proposals_ego_now = None
+            if self.cached_proposals_world is not None:
+                prop_delta = self.cached_proposals_world - ego_state['position'][:2]
+                _cos_h = np.cos(-ego_state['heading'])
+                _sin_h = np.sin(-ego_state['heading'])
+                proposals_ego_now = np.empty_like(prop_delta)
+                proposals_ego_now[..., 0] = _sin_h * prop_delta[..., 0] + _cos_h * prop_delta[..., 1]
+                proposals_ego_now[..., 1] = _cos_h * prop_delta[..., 0] - _sin_h * prop_delta[..., 1]
+
+            self.render_cam_f0_vis(
+                env, frame_id, ego_state, plan_traj,
+                proposals_ego=proposals_ego_now,
+                proposal_scores=self.cached_proposal_scores,
+                is_replay=(frame_id < self.ego_replay_frames),
+                is_replan=bool(needs_replan),
+            )
+            # Overlay cam_f0.jpg too if it exists already (no-op otherwise).
+            self.render_cam_f0_vis(None, frame_id, None, None)
 
             # Render candidate trajectory visualizations for any model that exposes them
             # Use cached prediction pose (not current ego pose) so candidates stay anchored to prediction point
@@ -2205,7 +2670,7 @@ class BaseEvaluator:
                 self.expected_rc_delta = None
 
         try:
-            for frame_id in tqdm(frame_ids, desc="Evaluating", disable=True):
+            for frame_id in tqdm(frame_ids, desc="Evaluating", disable=False):
                 # Process frame
                 control, ego_state, plan_traj, world_traj = self.process_frame(
                     env, frame_id, prev_velocity, prev_heading
@@ -2259,6 +2724,20 @@ class BaseEvaluator:
                 # Check termination
                 if (done or truncated) and not self.has_terminated:
                     self.has_terminated = True
+                    agent = env.agent
+                    crash_flags = {
+                        "crash_vehicle": getattr(agent, "crash_vehicle", False),
+                        "crash_object": getattr(agent, "crash_object", False),
+                        "crash_human": getattr(agent, "crash_human", False),
+                        "crash_building": getattr(agent, "crash_building", False),
+                        "out_of_road": getattr(agent, "out_of_road", False),
+                        "arrive_dest": getattr(agent, "arrive_destination", False),
+                    }
+                    info_summary = {k: info[k] for k in info if isinstance(info.get(k), (bool, int, float, str))}
+                    print(
+                        f"[Eval terminated] frame={frame_id} done={done} truncated={truncated} "
+                        f"agent_flags={crash_flags} info={info_summary}"
+                    )
                     break
 
         finally:
@@ -2385,9 +2864,10 @@ class BaseEvaluator:
 
             # Generate GIFs and MP4s from visualizations
             if self.enable_vis:
-                self.generate_gif(frame_ids, "topdown_visualization.gif", "topdown.png")
-                self.generate_gif(frame_ids, "cam_f0.gif", "cam_f0.jpg")
-                self.generate_mp4(frame_ids, "cam_f0.mp4", "cam_f0.jpg")
+                self.generate_mp4(frame_ids, f"bev_{self.scenario_name}.mp4", "topdown.png")
+                self.generate_mp4(frame_ids, f"cam_f0_{self.scenario_name}.mp4", "cam_f0.jpg")
+                self.generate_mp4(frame_ids, f"condition_{self.scenario_name}.mp4", "condition.jpg")
+                self.generate_mp4(frame_ids, f"cam_f0_md_{self.scenario_name}.mp4", "cam_f0_md.jpg")
                 self.generate_gif(frame_ids, "segmentation_visualization.gif", "segmentation_vis.png")
                 self.generate_gif(frame_ids, "occupancy_visualization.gif", "occupancy_vis.png")
                 self.generate_gif(frame_ids, "bev_embed_visualization.gif", "bev_embed_vis.png")
@@ -2396,6 +2876,7 @@ class BaseEvaluator:
                 # Generate replan summary (single image showing all replans with top-k coverage)
                 if hasattr(self, '_final_ego_position') and self._final_ego_position is not None:
                     self.render_replan_summary(env, self._final_ego_position)
+                    self.render_replan_summary_clean(env, self._final_ego_position)
 
                 # Generate candidate visualization GIFs for any model that produced them
                 self.generate_gif(frame_ids, "topdown_topk_visualization.gif", "topdown_topk.png")

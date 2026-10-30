@@ -38,7 +38,11 @@ class RAPFeatureBuilder(AbstractFeatureBuilder):
     def compute_features(self, agent_input: AgentInput) -> Dict[str, torch.Tensor]:
         """Inherited, see superclass."""
 
-        features = _get_bev_feature(agent_input)
+        features = _get_bev_feature(
+            agent_input,
+            cameras_to_use=list(self._config.cameras),
+            image_resize_hw=self._config.image_resize_hw,
+        )
         #features["lidar_feature"] = self._get_lidar_feature(agent_input)
 
         ego_feature_list=[]

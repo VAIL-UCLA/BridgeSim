@@ -1,10 +1,15 @@
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import numpy as np
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from nuplan.common.maps.abstract_map import SemanticMapLayer
+
+
+# Canonical 4-cam ordering used by the original RAP-DINO checkpoint.
+# Row order in the pretrained `cams_embeds` parameter (shape [4, embed_dims]).
+CANONICAL_CAM_ORDER: Tuple[str, ...] = ("cam_b0", "cam_f0", "cam_l0", "cam_r0")
 
 
 @dataclass
@@ -15,6 +20,24 @@ class RAPConfig:
     cache_data: bool = False
     train_metric_cache_path: str = "./train_metric_cache"
     ref_num: int=4
+
+    # Which cameras to feed to the model. Subset of CANONICAL_CAM_ORDER.
+    # Default matches the original 4-cam setup so legacy behavior is preserved.
+    cameras: List[str] = field(
+        default_factory=lambda: list(CANONICAL_CAM_ORDER)
+    )
+
+    # Optional input resize. When set to (H, W), every camera image is
+    # upscaled to this size in LoadMultiViewImageFromFiles before the fixed
+    # 0.4x RandomScaleImageMultiViewImage runs. Use to normalize lower-res
+    # input back to the native 1920x1080 the model was trained against;
+    # unset (None) leaves the image untouched.
+    image_resize_hw: Optional[Tuple[int, int]] = None
+
+    # Conservative fine-tune flag: when True, freeze the cam-agnostic stack
+    # (DINOv3, FPN, cams_embeds, hist_encoding, init_feature, BEV positional encodings)
+    # and tune only SCA/TSA inside Bev_refiner, traj_decoder MLPs, and Scorer heads.
+    freeze_bev_stack: bool = False
 
     traj_bev: bool=True
     traj_proposal_query: bool=True

@@ -12,6 +12,12 @@ from pathlib import Path
 
 # Initialize CUDA device BEFORE any imports that might use CUDA
 if 'CUDA_VISIBLE_DEVICES' in os.environ:
+    gpu = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[0]
+    try:
+        from panda3d.core import loadPrcFileData
+        loadPrcFileData('', f'egl-device-index {gpu}')
+    except Exception:
+        pass
     try:
         from cuda import cudart
         # cudaSetDevice returns a tuple (error_code, )
@@ -66,6 +72,17 @@ def create_trajectory_scorer(args):
 
     else:
         raise ValueError(f"Unknown trajectory scorer: {scorer_name}")
+
+
+def seed_everything(seed: int):
+    """Seed Python, NumPy and PyTorch RNGs for reproducible policy sampling."""
+    import random
+    import numpy as np
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def create_model_adapter(args):
@@ -134,6 +151,16 @@ def create_model_adapter(args):
             num_proposals=args.num_proposals,
         )
 
+    elif model_type == "rap_front":
+        from bridgesim.evaluation.models.rap_front_adapter import RAPFrontAdapter
+        scorer = create_trajectory_scorer(args)
+        return RAPFrontAdapter(
+            checkpoint_path=args.checkpoint,
+            image_source=args.image_source,
+            scorer=scorer,
+            num_proposals=args.num_proposals,
+        )
+
     elif model_type == "lead":
         from bridgesim.evaluation.models.lead_adapter import LEADAdapter
         return LEADAdapter(
@@ -154,6 +181,20 @@ def create_model_adapter(args):
             num_proposals=args.num_proposals,
         )
 
+    elif model_type == "drivor_front":
+        from bridgesim.evaluation.models.drivor_adapter import DrivoRAdapter
+        scorer = create_trajectory_scorer(args)
+        return DrivoRAdapter(
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+            num_cameras=1,
+            image_size=tuple(args.image_size) if args.image_size else (512, 288),
+            num_poses=args.num_poses,
+            use_lidar=args.use_lidar,
+            scorer=scorer,
+            num_proposals=args.num_proposals,
+        )
+
     elif model_type == "transfuser":
         from bridgesim.evaluation.models.transfuser_adapter import TransfuserAdapter
         return TransfuserAdapter(
@@ -165,6 +206,10 @@ def create_model_adapter(args):
         from bridgesim.evaluation.models.ltf_adapter import LTFAdapter
         return LTFAdapter(checkpoint_path=args.checkpoint)
 
+    elif model_type == "ltf_front":
+        from bridgesim.evaluation.models.ltf_front_adapter import LTFFrontAdapter
+        return LTFFrontAdapter(checkpoint_path=args.checkpoint)
+
     elif model_type in ["egomlp", "ego_mlp"]:
         from bridgesim.evaluation.models.ego_mlp_adapter import EgoStatusMLPAdapter
         return EgoStatusMLPAdapter(checkpoint_path=args.checkpoint)
@@ -174,6 +219,19 @@ def create_model_adapter(args):
         scorer = create_trajectory_scorer(args)
         num_groups = args.num_groups if args.num_groups is not None else (1 if scorer is None else 1)
         return DiffusionDriveAdapter(
+            checkpoint_path=args.checkpoint,
+            plan_anchor_path=args.plan_anchor_path,
+            scorer=scorer,
+            num_groups=num_groups,
+            num_proposals=args.num_proposals,
+            bev_calibrator=bev_calibrator,
+        )
+
+    elif model_type == "diffusiondrive_front":
+        from bridgesim.evaluation.models.diffusiondrive_front_adapter import DiffusionDriveFrontAdapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else 1
+        return DiffusionDriveFrontAdapter(
             checkpoint_path=args.checkpoint,
             plan_anchor_path=args.plan_anchor_path,
             scorer=scorer,
@@ -199,6 +257,32 @@ def create_model_adapter(args):
             temporal_max_history=args.temporal_max_history,
             temporal_sigma=args.temporal_sigma,
             consensus_temperature=args.consensus_temperature,
+        )
+
+    elif model_type == "diffusiondrivev2_front":
+        from bridgesim.evaluation.models.diffusiondrivev2_front_adapter import DiffusionDriveV2FrontAdapter
+        scorer = create_trajectory_scorer(args)
+        num_groups = args.num_groups if args.num_groups is not None else 10
+        return DiffusionDriveV2FrontAdapter(
+            checkpoint_path=args.checkpoint,
+            plan_anchor_path=args.plan_anchor_path,
+            scorer=scorer,
+            num_groups=num_groups,
+            num_proposals=args.num_proposals,
+            bev_calibrator=bev_calibrator,
+            enable_temporal_consistency=args.enable_temporal_consistency,
+            temporal_alpha=args.temporal_alpha,
+            temporal_lambda=args.temporal_lambda,
+            temporal_max_history=args.temporal_max_history,
+            temporal_sigma=args.temporal_sigma,
+            consensus_temperature=args.consensus_temperature,
+        )
+
+    elif model_type == "sparsedrivev2_front":
+        from bridgesim.evaluation.models.sparsedrivev2_front_adapter import SparseDriveV2FrontAdapter
+        return SparseDriveV2FrontAdapter(
+            checkpoint_path=args.checkpoint,
+            aux_dir=args.sd_aux_dir,
         )
 
     elif model_type == "lead_navsim":
@@ -260,6 +344,9 @@ def main():
             "uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
             "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive",
             "diffusiondrivev2", "openpilot", "alpamayo_r1", "pdm_closed", "pdm_closed2",
+            # Front-camera-only variants
+            "drivor_front", "diffusiondrive_front", "diffusiondrivev2_front",
+            "ltf_front", "rap_front", "sparsedrivev2_front",
         ],
         help="Model type to evaluate"
     )
@@ -296,6 +383,14 @@ def main():
         type=str,
         default=None,
         help="Path to plan anchor file (for DiffusionDrive/V2 models)"
+    )
+
+    parser.add_argument(
+        "--sd-aux-dir",
+        type=str,
+        default=None,
+        help="Directory containing SparseDrive aux assets (resnet34.bin + kmeans/*.npy/.npz). "
+             "Defaults to $DREAMSTREAM_POLICY_ROOT/aux/sparsedrive/"
     )
 
     # Inference scaling parameters (for DiffusionDrive/V2)
@@ -484,8 +579,8 @@ def main():
     parser.add_argument(
         "--bev-calibrator-checkpoint",
         type=str,
-        default="/home/zhihao/workspace/BridgeSim/calibration/checkpoints/BridgeSim-BevFlow/uniad-b2d/lr1e-4/epoch=9-step=24450.ckpt",
-        help="Path to BEV calibrator checkpoint (.ckpt file)"
+        default=None,
+        help="Path to BEV calibrator checkpoint (.ckpt file); required with --enable-bev-calibrator"
     )
     parser.add_argument(
         "--bev-sample-steps",
@@ -562,6 +657,41 @@ def main():
              "Scoring metrics and route completion are computed only from this frame onwards."
     )
 
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed for Python/NumPy/PyTorch RNGs, so stochastic policies "
+             "(e.g. DiffusionDrive sampling) are reproducible (default: 0)"
+    )
+
+    # World model (DreamStream) options
+    parser.add_argument(
+        "--use-world-model",
+        action="store_true",
+        help="Render camera observations with a DreamStream video-model server "
+             "instead of the MetaDrive RGB camera"
+    )
+    parser.add_argument(
+        "--server-url",
+        type=str,
+        default="http://127.0.0.1:8790",
+        help="URL of the DreamStream inference server (default: http://127.0.0.1:8790)"
+    )
+    parser.add_argument(
+        "--dreamstream-prompt",
+        type=str,
+        default="a driving scene",
+        help="Text prompt sent to the DreamStream server"
+    )
+    parser.add_argument(
+        "--first-frame-path",
+        type=str,
+        default=None,
+        help="Optional PNG/JPG used as the DreamStream anchor frame instead of the "
+             "last ego-replay log image (e.g. an image-edited weather variant)"
+    )
+
     # Runtime lidar sensors
     parser.add_argument(
         "--enable-runtime-lidar",
@@ -616,6 +746,9 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.enable_bev_calibrator and not args.bev_calibrator_checkpoint:
+        parser.error("--enable-bev-calibrator requires --bev-calibrator-checkpoint")
+    seed_everything(args.seed)
 
     # Validate arguments
     if args.model_type in ["uniad", "vad"] and not args.config:
@@ -645,7 +778,8 @@ def main():
     # Construct output directory with model parameters
     # Format: {output_dir}/{model_type}_rr{replan_rate}_erf{ego_replay_frames}_ef{eval_frames}[_ta{temporal_alpha}_th{temporal_max_history}]/
     eval_frames_str = str(args.eval_frames) if args.eval_frames is not None else "None"
-    output_subdir = f"{args.model_type}_rr{args.replan_rate}_erf{args.ego_replay_frames}_ef{eval_frames_str}"
+    wm_tag = "dreamstream" if args.use_world_model else "none"
+    output_subdir = f"{args.model_type}_rr{args.replan_rate}_erf{args.ego_replay_frames}_ef{eval_frames_str}_wm{wm_tag}"
     if args.trajectory_scorer:
         ng = args.num_groups if args.num_groups is not None else (1 if args.model_type == "diffusiondrive" else 10)
         output_subdir += f"_scorer_{args.trajectory_scorer}_ng{ng}"
@@ -653,10 +787,14 @@ def main():
             output_subdir += f"_np{args.num_proposals}"
     if args.enable_temporal_consistency:
         output_subdir += f"_ta{args.temporal_alpha}_th{args.temporal_max_history}"
+    if args.first_frame_path:
+        # <first_frame_dir>/<scenario>/<image> -> "_ff<first_frame_dir name>",
+        # as in BatchEvaluator._get_output_subdir.
+        output_subdir += f"_ff{Path(args.first_frame_path).parent.parent.name}"
     full_output_dir = os.path.join(args.output_dir, output_subdir)
 
     # Create evaluator
-    evaluator = BaseEvaluator(
+    common_kwargs = dict(
         model_adapter=model_adapter,
         scenario_path=args.scenario_path,
         output_dir=full_output_dir,
@@ -669,18 +807,29 @@ def main():
         sim_dt=args.sim_dt,
         ego_replay_frames=args.ego_replay_frames,
         eval_frames=args.eval_frames,
-        # scorer_type=args.scorer_type,
         score_start_frame=args.score_start_frame,
-        enable_runtime_lidar=args.enable_runtime_lidar,
-        runtime_lidar_num_lasers=args.runtime_lidar_num_lasers,
-        runtime_lidar_distance=args.runtime_lidar_distance,
-        runtime_lidar_height=args.runtime_lidar_height,
-        enable_runtime_point_cloud_lidar=args.enable_runtime_point_cloud_lidar,
-        runtime_point_cloud_lidar_width=args.runtime_point_cloud_lidar_width,
-        runtime_point_cloud_lidar_height=args.runtime_point_cloud_lidar_height,
-        runtime_point_cloud_lidar_fov=args.runtime_point_cloud_lidar_fov,
-        save_runtime_lidar=args.save_runtime_lidar,
     )
+    if not args.use_world_model:
+        evaluator = BaseEvaluator(
+            **common_kwargs,
+            enable_runtime_lidar=args.enable_runtime_lidar,
+            runtime_lidar_num_lasers=args.runtime_lidar_num_lasers,
+            runtime_lidar_distance=args.runtime_lidar_distance,
+            runtime_lidar_height=args.runtime_lidar_height,
+            enable_runtime_point_cloud_lidar=args.enable_runtime_point_cloud_lidar,
+            runtime_point_cloud_lidar_width=args.runtime_point_cloud_lidar_width,
+            runtime_point_cloud_lidar_height=args.runtime_point_cloud_lidar_height,
+            runtime_point_cloud_lidar_fov=args.runtime_point_cloud_lidar_fov,
+            save_runtime_lidar=args.save_runtime_lidar,
+        )
+    else:
+        from bridgesim.evaluation.core.dreamstream_evaluator import DreamStreamEvaluator
+        evaluator = DreamStreamEvaluator(
+            **common_kwargs,
+            server_url=args.server_url,
+            first_frame_path=args.first_frame_path,
+            prompt=args.dreamstream_prompt,
+        )
 
     # Run evaluation
     evaluator.run()

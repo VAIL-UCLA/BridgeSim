@@ -6,7 +6,8 @@ Features:
 - Progress tracking with ETA
 - Error handling and recovery
 - Result aggregation
-- Optional parallel processing
+- Optional parallel processing (MultiProcessBatchEvaluator)
+- Multi-GPU support with per-process GPU assignment
 - Resume capability
 """
 
@@ -14,12 +15,19 @@ import os
 import sys
 import argparse
 import subprocess
+import multiprocessing
+import threading
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 import numpy as np
+
+
+DEFAULT_SERVER_URL = "http://127.0.0.1:8790"
+FIRST_FRAME_NAME = "original_cam_f0.png"
 
 
 class BatchEvaluator:
@@ -74,7 +82,12 @@ class BatchEvaluator:
                  runtime_point_cloud_lidar_width: int = 200,
                  runtime_point_cloud_lidar_height: int = 64,
                  runtime_point_cloud_lidar_fov: float = 90.0,
-                 save_runtime_lidar: bool = False):
+                 save_runtime_lidar: bool = False,
+                 use_world_model: bool = False,
+                 server_urls: Optional[List[str]] = None,
+                 first_frame_dir: str = None,
+                 dreamstream_prompt: str = None,
+                 ):
         """
         Initialize batch evaluator.
 
@@ -161,11 +174,28 @@ class BatchEvaluator:
         self.runtime_point_cloud_lidar_fov = runtime_point_cloud_lidar_fov
         self.save_runtime_lidar = save_runtime_lidar
 
+        self.use_world_model = use_world_model
+        # One DreamStream server per concurrent scenario (servers are stateful).
+        self.server_urls = list(server_urls) if server_urls else [DEFAULT_SERVER_URL]
+        self.first_frame_dir = Path(first_frame_dir) if first_frame_dir else None
+        self.dreamstream_prompt = dreamstream_prompt
+
         # Create output directories
         self.output_root.mkdir(parents=True, exist_ok=True)
 
         # Result tracking (in-memory only)
         self.results = {'scenarios': {}}
+
+    def _scenario_first_frame_path(self, scenario_name: str) -> Optional[Path]:
+        """Return the path to the edited first frame for a scenario, or None.
+
+        Layout expected:
+            <first_frame_dir>/<scenario_name>/original_cam_f0.png
+        """
+        if self.first_frame_dir is None:
+            return None
+        candidate = self.first_frame_dir / scenario_name / FIRST_FRAME_NAME
+        return candidate if candidate.exists() else None
 
     def get_scenarios(self) -> List[Path]:
         """Get list of scenario directories."""
@@ -173,6 +203,20 @@ class BatchEvaluator:
             d for d in sorted(self.scenario_root.iterdir())
             if d.is_dir() and not d.name.startswith('.')
         ]
+
+        # When a first-frame override directory is supplied, restrict the
+        # batch to the intersection of scenarios in scenario_root and those
+        # that have an edited first frame available.
+        if self.first_frame_dir is not None:
+            before = len(scenarios)
+            scenarios = [
+                s for s in scenarios
+                if self._scenario_first_frame_path(s.name) is not None
+            ]
+            print(
+                f"first_frame_dir={self.first_frame_dir}: "
+                f"{len(scenarios)}/{before} scenarios have an edited first frame"
+            )
 
         # Filter out completed scenarios if resuming
         if self.resume:
@@ -191,7 +235,8 @@ class BatchEvaluator:
         --output-dir.  Must stay in sync with the logic in unified_evaluator.py.
         """
         eval_frames_str = str(self.eval_frames) if self.eval_frames is not None else "None"
-        subdir = f"{self.model_type}_rr{self.replan_rate}_erf{self.ego_replay_frames}_ef{eval_frames_str}"
+        wm_tag = "dreamstream" if self.use_world_model else "none"
+        subdir = f"{self.model_type}_rr{self.replan_rate}_erf{self.ego_replay_frames}_ef{eval_frames_str}_wm{wm_tag}"
         if self.trajectory_scorer:
             ng = self.num_groups if self.num_groups is not None else (
                 1 if self.model_type == "diffusiondrive" else 10)
@@ -204,6 +249,8 @@ class BatchEvaluator:
             subdir += f"_runtime_lidar{self.runtime_lidar_num_lasers}"
         if self.enable_runtime_point_cloud_lidar:
             subdir += f"_runtime_pcl{self.runtime_point_cloud_lidar_width}x{self.runtime_point_cloud_lidar_height}"
+        if self.first_frame_dir is not None:
+            subdir += f"_ff{self.first_frame_dir.name}"
         return subdir
 
     def evaluate_scenario(self, scenario_path: Path) -> Dict[str, Any]:
@@ -324,6 +371,17 @@ class BatchEvaluator:
             cmd.extend(["--alp-num-traj-samples", str(self.alp_num_traj_samples)])
             cmd.extend(["--alp-max-generation-length", str(self.alp_max_generation_length)])
 
+        if self.use_world_model:
+            cmd.append("--use-world-model")
+            cmd.extend(["--server-url", self.server_urls[0]])
+
+        # Per-scenario DreamStream first-frame override + prompt
+        ff_path = self._scenario_first_frame_path(scenario_name)
+        if ff_path is not None:
+            cmd.extend(["--first-frame-path", str(ff_path)])
+        if self.dreamstream_prompt is not None:
+            cmd.extend(["--dreamstream-prompt", self.dreamstream_prompt])
+
         # Run evaluation
         start_time = time.time()
         try:
@@ -422,7 +480,7 @@ class BatchEvaluator:
         """Export batch_driving_score_summary.csv with one row per scenario + AVERAGE."""
         import csv as csv_mod
 
-        csv_path = self.output_root / "batch_driving_score_summary.csv"
+        csv_path = self.output_root / self._get_output_subdir() / "batch_driving_score_summary.csv"
         columns = ['scenario', 'DS', 'EPDMS_no_ep', 'RC', 'NC', 'DAC', 'DDC', 'TL', 'TTC', 'LK', 'HC', 'EC']
 
         rows = []
@@ -482,13 +540,380 @@ class BatchEvaluator:
         print(f"{'='*60}")
 
 
+# Module-level reference to the shared GPU / world-model endpoint queues,
+# set by each worker process via the initializer. This avoids pickling
+# issues with multiprocessing.Queue.
+_gpu_queue: multiprocessing.Queue = None
+_wm_queue: multiprocessing.Queue = None
+
+
+def _worker_init(gpu_queue: multiprocessing.Queue, wm_queue: multiprocessing.Queue):
+    """ProcessPoolExecutor initializer: store the shared queues in each worker."""
+    global _gpu_queue, _wm_queue
+    _gpu_queue = gpu_queue
+    _wm_queue = wm_queue
+
+
+def _evaluate_scenario_worker(args_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Worker function for multi-process scenario evaluation.
+
+    Grabs a GPU and a world-model endpoint from the shared pool queues, runs
+    the scenario, and returns both to the pool when done. Module-level so it
+    is picklable by ProcessPoolExecutor.
+    """
+    scenario_path = Path(args_dict['scenario_path'])
+    scenario_name = scenario_path.name
+    log_dir = Path(args_dict['log_dir'])
+    output_root = Path(args_dict['output_root'])
+    output_subdir = args_dict['output_subdir']
+    eval_dir = args_dict['eval_dir']
+    cmd = list(args_dict['cmd'])
+
+    log_file = log_dir / f"{scenario_name}.log"
+
+    gpu_id = _gpu_queue.get()
+    wm_endpoint = _wm_queue.get()
+
+    env = os.environ.copy()
+    env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    if wm_endpoint:
+        cmd.extend(["--server-url", wm_endpoint])
+
+    start_time = time.time()
+    try:
+        with open(log_file, 'w') as f:
+            result = subprocess.run(
+                cmd,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                cwd=eval_dir,
+                timeout=3600,
+                env=env,
+            )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            summary_csv = output_root / output_subdir / scenario_name / "driving_score_summary.csv"
+            if summary_csv.exists():
+                import csv as csv_mod
+                avg_scores = {}
+                with open(summary_csv, 'r') as f:
+                    reader = csv_mod.DictReader(f)
+                    for row in reader:
+                        if row.get('frame_id') == 'AVERAGE':
+                            avg_scores = {k: v for k, v in row.items() if k != 'frame_id'}
+                            break
+                return {
+                    'scenario_name': scenario_name,
+                    'result': {
+                        'status': 'success',
+                        'duration': duration,
+                        'exit_code': 0,
+                        'gpu_id': gpu_id,
+                        'log_file': str(log_file),
+                        'scores': avg_scores,
+                        'timestamp': datetime.now().isoformat(),
+                    },
+                }
+            return {
+                'scenario_name': scenario_name,
+                'result': {
+                    'status': 'error',
+                    'duration': duration,
+                    'exit_code': 0,
+                    'gpu_id': gpu_id,
+                    'error': 'driving_score_summary.csv not found',
+                    'log_file': str(log_file),
+                    'timestamp': datetime.now().isoformat(),
+                },
+            }
+        return {
+            'scenario_name': scenario_name,
+            'result': {
+                'status': 'failed',
+                'duration': duration,
+                'exit_code': result.returncode,
+                'gpu_id': gpu_id,
+                'log_file': str(log_file),
+                'timestamp': datetime.now().isoformat(),
+            },
+        }
+
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
+        return {
+            'scenario_name': scenario_name,
+            'result': {
+                'status': 'timeout',
+                'duration': duration,
+                'gpu_id': gpu_id,
+                'error': 'Evaluation timeout (1 hour)',
+                'log_file': str(log_file),
+                'timestamp': datetime.now().isoformat(),
+            },
+        }
+    except Exception as e:
+        duration = time.time() - start_time
+        return {
+            'scenario_name': scenario_name,
+            'result': {
+                'status': 'error',
+                'duration': duration,
+                'gpu_id': gpu_id,
+                'error': str(e),
+                'log_file': str(log_file),
+                'timestamp': datetime.now().isoformat(),
+            },
+        }
+    finally:
+        _gpu_queue.put(gpu_id)
+        _wm_queue.put(wm_endpoint)
+
+
+class MultiProcessBatchEvaluator(BatchEvaluator):
+    """
+    Multi-process batch evaluator that runs scenarios in parallel across a
+    pool of GPUs and world-model inference endpoints.
+
+    Extends BatchEvaluator with a `run` method that dispatches scenarios to
+    worker subprocesses via ProcessPoolExecutor. Each worker acquires a
+    GPU and a world-model endpoint from shared queues for the duration of
+    one scenario and releases them when finished.
+    """
+
+    def __init__(self,
+                 *args,
+                 num_gpus: int = 1,
+                 gpu_ids: Optional[List[int]] = None,
+                 chunk_num: int = 1,
+                 chunk_idx: int = 0,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if gpu_ids is not None:
+            self.gpu_ids = list(gpu_ids)
+        else:
+            self.gpu_ids = list(range(num_gpus))
+
+        if not self.gpu_ids:
+            raise ValueError("Must specify at least one GPU (num_gpus >= 1 or non-empty gpu_ids)")
+
+        if self.max_workers <= 1:
+            self.max_workers = len(self.gpu_ids)
+
+        self.chunk_num = chunk_num
+        self.chunk_idx = chunk_idx
+
+        self.log_dir = self.output_root / self._get_output_subdir() / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_scenarios(self) -> List[Path]:
+        scenarios = super().get_scenarios()
+        if self.chunk_num > 1:
+            scenarios = sorted(scenarios, key=lambda s: s.name)
+            total = len(scenarios)
+            chunk_size = (total + self.chunk_num - 1) // self.chunk_num
+            start_idx = self.chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, total)
+            scenarios = scenarios[start_idx:end_idx]
+            print(f"Processing chunk {self.chunk_idx + 1}/{self.chunk_num}: "
+                  f"scenarios {start_idx} to {end_idx - 1}")
+        return scenarios
+
+    def _build_cmd(self, scenario_path: Path) -> List[str]:
+        """Build the unified_evaluator command for a scenario.
+
+        Mirrors BatchEvaluator.evaluate_scenario's command construction, so
+        the two code paths stay in sync.
+        """
+        cmd = [
+            sys.executable,
+            "unified_evaluator.py",
+            "--model-type", self.model_type,
+            "--checkpoint", self.checkpoint_path,
+            "--scenario-path", str(scenario_path),
+            "--traffic-mode", self.traffic_mode,
+            "--output-dir", str(self.output_root),
+        ]
+
+        if self.config_path:
+            cmd.extend(["--config", self.config_path])
+        if self.plan_anchor_path:
+            cmd.extend(["--plan-anchor-path", self.plan_anchor_path])
+        if not self.save_perframe:
+            cmd.append("--no-save-perframe")
+        if self.enable_bev_calibrator:
+            cmd.append("--enable-bev-calibrator")
+            if self.bev_calibrator_checkpoint:
+                cmd.extend(["--bev-calibrator-checkpoint", self.bev_calibrator_checkpoint])
+            cmd.extend(["--bev-sample-steps", str(self.bev_sample_steps)])
+            if self.bev_use_ema:
+                cmd.append("--bev-use-ema")
+            else:
+                cmd.append("--bev-no-ema")
+        cmd.extend(["--controller", self.controller_type])
+        cmd.extend(["--replan-rate", str(self.replan_rate)])
+        cmd.extend(["--sim-dt", str(self.sim_dt)])
+        cmd.extend(["--ego-replay-frames", str(self.ego_replay_frames)])
+        if self.eval_frames is not None:
+            cmd.extend(["--eval-frames", str(self.eval_frames)])
+        if self.score_start_frame is not None:
+            cmd.extend(["--score-start-frame", str(self.score_start_frame)])
+        cmd.extend(["--eval-mode", self.eval_mode])
+        if self.enable_vis:
+            cmd.append("--enable-vis")
+        if self.enable_temporal_consistency:
+            cmd.append("--enable-temporal-consistency")
+            cmd.extend(["--temporal-alpha", str(self.temporal_alpha)])
+            cmd.extend(["--temporal-lambda", str(self.temporal_lambda)])
+            cmd.extend(["--temporal-max-history", str(self.temporal_max_history)])
+            cmd.extend(["--temporal-sigma", str(self.temporal_sigma)])
+            cmd.extend(["--consensus-temperature", str(self.consensus_temperature)])
+        if self.trajectory_scorer:
+            cmd.extend(["--trajectory-scorer", self.trajectory_scorer])
+        if self.num_groups is not None:
+            cmd.extend(["--num-groups", str(self.num_groups)])
+        if self.num_proposals is not None:
+            cmd.extend(["--num-proposals", str(self.num_proposals)])
+        if self.v2_scorer_checkpoint:
+            cmd.extend(["--v2-scorer-checkpoint", self.v2_scorer_checkpoint])
+        if self.model_type == "alpamayo_r1":
+            if self.alp_python:
+                cmd.extend(["--alp-python", self.alp_python])
+            if self.alp_script:
+                cmd.extend(["--alp-script", self.alp_script])
+            cmd.extend(["--alp-coord-mode", self.alp_coord_mode])
+            cmd.extend(["--alp-top-p", str(self.alp_top_p)])
+            cmd.extend(["--alp-temperature", str(self.alp_temperature)])
+            cmd.extend(["--alp-num-traj-samples", str(self.alp_num_traj_samples)])
+            cmd.extend(["--alp-max-generation-length", str(self.alp_max_generation_length)])
+
+        if self.use_world_model:
+            cmd.append("--use-world-model")
+
+        # Per-scenario DreamStream first-frame override + prompt
+        ff_path = self._scenario_first_frame_path(scenario_path.name)
+        if ff_path is not None:
+            cmd.extend(["--first-frame-path", str(ff_path)])
+        if self.dreamstream_prompt is not None:
+            cmd.extend(["--dreamstream-prompt", self.dreamstream_prompt])
+
+        return cmd
+
+    def run(self):
+        """Run batch evaluation in parallel across the GPU / endpoint pools."""
+        scenarios = self.get_scenarios()
+
+        if not scenarios:
+            print("No scenarios to evaluate!")
+            return
+
+        print(f"\n{'='*60}")
+        print(f"Starting Multi-Process Batch Evaluation")
+        print(f"{'='*60}")
+        print(f"Total scenarios: {len(scenarios)}")
+        print(f"Model: {self.model_type}")
+        print(f"Workers: {self.max_workers}")
+        print(f"GPUs: {self.gpu_ids}")
+        print(f"Output: {self.output_root}")
+        print(f"{'='*60}\n")
+
+        gpu_queue = multiprocessing.Queue()
+        slots_per_gpu = max(1, self.max_workers // len(self.gpu_ids))
+        remainder = self.max_workers - slots_per_gpu * len(self.gpu_ids)
+        for i, gpu_id in enumerate(self.gpu_ids):
+            n = slots_per_gpu + (1 if i < remainder else 0)
+            for _ in range(n):
+                gpu_queue.put(gpu_id)
+
+        wm_queue = multiprocessing.Queue()
+
+        if self.use_world_model:
+            if self.max_workers != len(self.server_urls):
+                raise ValueError(
+                    f"--max-workers ({self.max_workers}) must equal the number of "
+                    f"--server-urls ({len(self.server_urls)}): each concurrent "
+                    f"scenario needs its own DreamStream server.")
+            for wm_endpoint in self.server_urls:
+                wm_queue.put(wm_endpoint)
+        else:
+            for _ in range(self.max_workers):
+                wm_queue.put("")
+
+        eval_dir = str(Path(__file__).parent)
+        output_subdir = self._get_output_subdir()
+        worker_args_list = [
+            {
+                'scenario_path': str(p),
+                'log_dir': str(self.log_dir),
+                'output_root': str(self.output_root),
+                'output_subdir': output_subdir,
+                'eval_dir': eval_dir,
+                'cmd': self._build_cmd(p),
+            }
+            for p in scenarios
+        ]
+
+        results_lock = threading.Lock()
+
+        with ProcessPoolExecutor(
+            max_workers=self.max_workers,
+            initializer=_worker_init,
+            initargs=(gpu_queue, wm_queue),
+        ) as executor:
+            future_to_scenario = {
+                executor.submit(_evaluate_scenario_worker, args): args['scenario_path']
+                for args in worker_args_list
+            }
+
+            pbar = tqdm(total=len(scenarios), desc="Evaluating scenarios")
+            for future in as_completed(future_to_scenario):
+                try:
+                    worker_result = future.result()
+                except Exception as e:
+                    scenario_path = future_to_scenario[future]
+                    scenario_name = Path(scenario_path).name
+                    worker_result = {
+                        'scenario_name': scenario_name,
+                        'result': {
+                            'status': 'error',
+                            'duration': 0,
+                            'error': f'Worker exception: {e}',
+                            'timestamp': datetime.now().isoformat(),
+                        },
+                    }
+
+                scenario_name = worker_result['scenario_name']
+                result = worker_result['result']
+                with results_lock:
+                    self.results['scenarios'][scenario_name] = result
+
+                status_symbol = {
+                    'success': '✓', 'failed': '✗', 'error': '⚠', 'timeout': '⏱'
+                }.get(result['status'], '?')
+                gpu_info = f" [GPU {result.get('gpu_id', '?')}]"
+                tqdm.write(
+                    f"{status_symbol} {scenario_name}: {result['status']}"
+                    f" ({result.get('duration', 0):.1f}s){gpu_info}"
+                )
+                pbar.update(1)
+
+            pbar.close()
+
+        self.aggregate_all_results()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch evaluation for multiple scenarios")
-
     parser.add_argument('--model-type', type=str, required=True,
                         choices=["uniad", "vad", "tcp", "rap", "lead", "lead_navsim", "drivor",
                                  "transfuser", "ltf", "egomlp", "ego_mlp", "diffusiondrive", "diffusiondrivev2", "openpilot",
-                                 "alpamayo_r1", "pdm_closed", "pdm_closed2"],
+                                 "alpamayo_r1", "pdm_closed", "pdm_closed2",
+                                 # Front-camera-only variants
+                                 "drivor_front", "diffusiondrive_front", "diffusiondrivev2_front",
+                                 "ltf_front", "rap_front", "sparsedrivev2_front"],
                         help="Model type")
 
     parser.add_argument('--checkpoint', type=str, required=True,
@@ -527,7 +952,7 @@ def main():
                         help="Enable BEV calibrator for domain adaptation (MetaDrive -> Bench2Drive)")
 
     parser.add_argument('--bev-calibrator-checkpoint', type=str,
-                        default="/home/zhihao/workspace/BridgeSim/calibration/checkpoints/BridgeSim-BevFlow/uniad-b2d/lr1e-4/epoch=9-step=24450.ckpt",
+                        default=None,
                         help="Path to BEV calibrator checkpoint (.ckpt file)")
 
     parser.add_argument('--bev-sample-steps', type=int, default=50,
@@ -631,6 +1056,52 @@ def main():
                         help="Path to DiffusionDrive v2 checkpoint for loading coarse scorer weights. "
                              "Required when using --trajectory-scorer learned with DiffusionDrive v1.")
 
+    # World-model options
+    parser.add_argument(
+        "--use-world-model",
+        action="store_true",
+        help="Use DreamStream server observations instead of the MetaDrive RGB camera"
+    )
+    parser.add_argument(
+        "--server-urls",
+        type=str,
+        default=DEFAULT_SERVER_URL,
+        help="Comma-separated DreamStream server URLs (default: "
+             f"{DEFAULT_SERVER_URL}). With multiple workers, pass one URL per "
+             "worker; --max-workers must equal the number of URLs."
+    )
+    parser.add_argument(
+        "--first-frame-dir",
+        type=str,
+        default=None,
+        help="Directory of edited DreamStream anchor frames. Expected layout: "
+             f"<first_frame_dir>/<scenario_name>/{FIRST_FRAME_NAME}. "
+             "When set, the batch is restricted to scenarios with an edited "
+             "frame available, and each scenario's frame is passed to "
+             "unified_evaluator via --first-frame-path. The basename of this "
+             "directory is appended to the output subdir."
+    )
+    parser.add_argument(
+        "--dreamstream-prompt",
+        type=str,
+        default=None,
+        help="Text prompt sent to DreamStream for every scenario in this batch "
+             "(e.g. 'A driving scene, heavy rain'). If unset, unified_evaluator "
+             "uses its own default."
+    )
+    # Multi-process / multi-GPU options
+    parser.add_argument('--num-gpus', type=int, default=1,
+                        help="Number of GPUs to use for multi-process evaluation (default: 1). "
+                             "Scenarios are dispatched across GPUs via a shared pool. "
+                             "Ignored if --gpu-ids is provided.")
+    parser.add_argument('--gpu-ids', type=str, default=None,
+                        help="Comma-separated list of GPU IDs to use (e.g. '0,2,5'). "
+                             "Overrides --num-gpus.")
+    parser.add_argument('--chunk-num', type=int, default=1,
+                        help="Number of chunks to split the scenario list into (for distributed runs).")
+    parser.add_argument('--chunk-idx', type=int, default=0,
+                        help="Index of the chunk to process (0-based, requires --chunk-num).")
+
     # Runtime lidar sensors
     parser.add_argument('--enable-runtime-lidar', action='store_true',
                         help='Enable MetaDrive runtime ray lidar and expose it in the unified lidar dict')
@@ -655,8 +1126,17 @@ def main():
     if args.save_runtime_lidar and not (args.enable_runtime_lidar or args.enable_runtime_point_cloud_lidar):
         parser.error('--save-runtime-lidar requires at least one runtime lidar sensor to be enabled')
 
-    # Create batch evaluator
-    evaluator = BatchEvaluator(
+    gpu_ids = None
+    if args.gpu_ids is not None:
+        gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(',')]
+
+    use_multiprocess = (
+        args.num_gpus > 1
+        or (gpu_ids is not None and len(gpu_ids) > 1)
+        or args.max_workers > 1
+    )
+
+    evaluator_kwargs = dict(
         model_type=args.model_type,
         checkpoint_path=args.checkpoint,
         scenario_root=args.scenario_root,
@@ -705,9 +1185,24 @@ def main():
         runtime_point_cloud_lidar_height=args.runtime_point_cloud_lidar_height,
         runtime_point_cloud_lidar_fov=args.runtime_point_cloud_lidar_fov,
         save_runtime_lidar=args.save_runtime_lidar,
+        use_world_model=args.use_world_model,
+        server_urls=[u.strip() for u in args.server_urls.split(",") if u.strip()],
+        first_frame_dir=args.first_frame_dir,
+        dreamstream_prompt=args.dreamstream_prompt,
     )
 
-    # Run evaluation
+    def _make_evaluator(kw):
+        if use_multiprocess:
+            return MultiProcessBatchEvaluator(
+                **kw,
+                num_gpus=args.num_gpus,
+                gpu_ids=gpu_ids,
+                chunk_num=args.chunk_num,
+                chunk_idx=args.chunk_idx,
+            )
+        return BatchEvaluator(**kw)
+
+    evaluator = _make_evaluator(evaluator_kwargs)
     try:
         evaluator.run()
     except KeyboardInterrupt:

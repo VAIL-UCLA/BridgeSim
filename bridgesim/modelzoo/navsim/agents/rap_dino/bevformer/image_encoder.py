@@ -15,7 +15,7 @@ class ImgEncoder(nn.Module):
         super().__init__()
         self.embed_dims = config.tf_d_model
         self.num_feature_levels = num_feature_levels
-        num_cams = 4
+        num_cams = len(config.cameras)
 
         self.num_cams = num_cams
         self.use_cams_embeds = True

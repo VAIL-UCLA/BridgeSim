@@ -1,7 +1,12 @@
 """
 Model configuration file - maps each adapter to its checkpoint path.
 
-Checkpoint Base Path: ckpts/BridgeSim (relative to repo root)
+Checkpoint Base Path: ckpts/BridgeSim (relative to repo root; override with
+    the BRIDGESIM_CKPT_ROOT environment variable)
+Front-camera policy Base Path: ckpts/DreamStream/policy (override with the
+    DREAMSTREAM_POLICY_ROOT environment variable). This is the layout produced by
+    `hf download UCLA-VAIL/DreamStream --include "policy/*"
+    --local-dir ckpts/DreamStream`; see docs/dreamstream.md.
 Config Base Path: bridgesim/modelzoo/bench2drive (relative to repo root)
 
 Directory Structure:
@@ -15,7 +20,10 @@ from pathlib import Path
 # Base paths (relative to this file's directory)
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent.parent.parent  # bridgesim/evaluation/models -> repo root
-CKPT_BASE = str((_REPO_ROOT / "ckpts/BridgeSim").resolve())
+CKPT_BASE = str(Path(os.environ.get(
+    "BRIDGESIM_CKPT_ROOT", _REPO_ROOT / "ckpts/BridgeSim")).resolve())
+FRONT_ONLY_BASE = str(Path(os.environ.get(
+    "DREAMSTREAM_POLICY_ROOT", _REPO_ROOT / "ckpts/DreamStream/policy")).resolve())
 _MODELZOO_BENCH2DRIVE = _THIS_DIR.parent.parent / "modelzoo" / "bench2drive"
 
 # Model checkpoint configurations
@@ -56,6 +64,11 @@ NAVSIMV2_MODELS = {
         "config": None,
         "description": "DrivoR model trained on NavSim v2",
     },
+    "drivor_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "drivor_front_Nav2_10epochs.pth"),
+        "config": None,
+        "description": "DrivoR front-camera-only model trained on NavSim v2",
+    },
     "lead_navsim": {
         "checkpoint": os.path.join(CKPT_BASE, "navsimv2/LEAD_navsim/model_0060.pth"),
         "config": None,
@@ -85,7 +98,36 @@ NAVSIMV2_MODELS = {
         "checkpoint": "nvidia/Alpamayo-R1-10B",
         "config": None,
         "description": "Alpamayo-R1 VLA model"
-    }
+    },
+    # Front-camera-only variants used by DreamStream (checkpoints live under
+    # FRONT_ONLY_BASE; RAP is the official 4-camera RAP-DINO NAVSIM v1 checkpoint).
+    "diffusiondrive_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "diffusiondrive_front_only_epoch_99_step_33300.ckpt"),
+        "config": None,
+        "plan_anchor_path": os.path.join(FRONT_ONLY_BASE, "aux/kmeans_navsim_traj_20.npy"),
+        "description": "DiffusionDrive front-camera-only",
+    },
+    "diffusiondrivev2_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "diffusiondrivev2_epoch19_step6660.ckpt"),
+        "config": None,
+        "plan_anchor_path": os.path.join(FRONT_ONLY_BASE, "aux/kmeans_navsim_traj_20.npy"),
+        "description": "DiffusionDriveV2 front-camera-only",
+    },
+    "ltf_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "ltf_epoch99_step_11100.ckpt"),
+        "config": None,
+        "description": "LTF (Latent TransFuser) front-camera-only",
+    },
+    "rap_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "RAP_DINO_navsimv1.ckpt"),
+        "config": None,
+        "description": "RAP-DINO front-camera-only (official 4-camera checkpoint)",
+    },
+    "sparsedrivev2_front": {
+        "checkpoint": os.path.join(FRONT_ONLY_BASE, "sparsedrivev2_epoch_9_step_6650.ckpt"),
+        "config": None,
+        "description": "SparseDriveV2 front-camera-only",
+    },
 }
 
 # Other models

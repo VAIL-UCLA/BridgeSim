@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 from .transform3d import PhotoMetricDistortionMultiViewImage ,NormalizeMultiviewImage \
     ,RandomScaleImageMultiViewImage ,PadMultiViewImage
@@ -13,7 +14,8 @@ RandomScaleImageMultiViewImage = RandomScaleImageMultiViewImage(scales=[0.4])
 PadMultiViewImage = PadMultiViewImage(size=None, size_divisor=32, pad_val=0)
 
 
-def LoadMultiViewImageFromFiles(agent_input,synthetic=False):
+def LoadMultiViewImageFromFiles(agent_input, synthetic=False, cameras_to_use=None,
+                                image_resize_hw=None):
     image_result = {}
 
     lidar2img_rts = []
@@ -24,16 +26,32 @@ def LoadMultiViewImageFromFiles(agent_input,synthetic=False):
     image_result["img"] = []
     validity_list = []
 
+    if cameras_to_use is None:
+        cameras_to_use = ["cam_b0", "cam_f0", "cam_l0", "cam_r0"]
+
     for cameras in agent_input.cameras[-1:]:
-        for cam in [cameras.cam_b0, cameras.cam_f0, cameras.cam_l0,cameras.cam_r0]:#, cameras.cam_l1, cameras.cam_r1 cameras.cam_l1, cameras.cam_l2, , cameras.cam_r1, cameras.cam_r2
+        for cam_name in cameras_to_use:
+            cam = getattr(cameras, cam_name)
             if cam.image is None:
                 continue
             if synthetic:
-                img = cam.rendered_image.astype(np.float32)
+                # Rasterized renderings are not always present (e.g. plain NAVSIM
+                # eval); fall back to the real image so the feature-builder
+                # shape stays stable. The model only consumes `camera_feature`
+                # (real) at inference, so the synthetic branch is built but
+                # unused in that path.
+                if getattr(cam, "rendered_image", None) is None:
+                    img = cam.image.astype(np.float32)
+                else:
+                    img = cam.rendered_image.astype(np.float32)
                 validity = torch.tensor(True)
             else:
                 img = cam.image.astype(np.float32)
                 validity = torch.tensor(cam.real_valid)
+
+            if image_resize_hw is not None and tuple(img.shape[:2]) != tuple(image_resize_hw):
+                target_h, target_w = image_resize_hw
+                img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4).astype(np.float32)
 
             image_result["img"].append(img)
             validity_list.append(validity)
@@ -70,9 +88,10 @@ def LoadMultiViewImageFromFiles(agent_input,synthetic=False):
 
 
 
-def _get_bev_feature( agent_input, training: bool=False):
-    synthetic_image_result=LoadMultiViewImageFromFiles(agent_input,synthetic=True)
-    real_image_result=LoadMultiViewImageFromFiles(agent_input,synthetic=False)
+def _get_bev_feature(agent_input, training: bool=False, cameras_to_use=None,
+                     image_resize_hw=None):
+    synthetic_image_result=LoadMultiViewImageFromFiles(agent_input, synthetic=True, cameras_to_use=cameras_to_use, image_resize_hw=image_resize_hw)
+    real_image_result=LoadMultiViewImageFromFiles(agent_input, synthetic=False, cameras_to_use=cameras_to_use, image_resize_hw=image_resize_hw)
     # if training:
     #     image_result = PhotoMetricDistortionMultiViewImage(image_result)
     image_result = synthetic_image_result

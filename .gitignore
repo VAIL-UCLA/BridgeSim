@@ -115,3 +115,9 @@ dmypy.json
 
 # nuplan-devkit
 nuplan-devkit/
+
+# Local checkpoints / scenarios (may be symlinks), env files
+/ckpts
+/converted_scenarios
+env.sh
+*.bak

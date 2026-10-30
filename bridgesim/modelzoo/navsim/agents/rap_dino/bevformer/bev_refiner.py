@@ -32,7 +32,7 @@ class Bev_refiner(nn.Module):
 
 
         _num_levels_ = 1
-        num_cams = 4
+        num_cams = len(config.cameras)
 
         num_layers = config.num_bev_layers
 
